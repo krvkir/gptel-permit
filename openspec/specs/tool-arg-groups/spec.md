@@ -6,15 +6,15 @@ Decouple permission rules from concrete tool definitions by introducing an indir
 ## Requirements
 
 ### Requirement: Tool-Group Mapping
-The system SHALL maintain a `defcustom` mapping each concrete tool name to a tool-group name and each of its argument keys to optional arg-group names.
+The system SHALL provide a `defcustom` `gptel-permit-tool-groups` mapping each concrete tool name to a plist with keys `:tool-group` (a symbol naming the group) and `:arg-groups` (an alist mapping argument keywords to arg-group symbols). Both keys are optional — a tool with no `:tool-group` belongs to no group, and an argument with no mapping belongs to no arg-group.
 
-#### Scenario: Default grouping for gptel-agent tools
+#### Scenario: Default grouping for common tools
 - GIVEN the `gptel-permit-tool-groups` defcustom
-- WHEN the system is loaded
-- THEN "Read", "Glob", and "Grep" SHALL belong to the "read" tool-group by default
-- AND "Write", "Edit", "Insert", and "Mkdir" SHALL belong to the "write" tool-group by default
-- AND "Bash" SHALL belong to the "shell" tool-group by default
-- AND their path-related arguments (`:file_path`, `:path`, `:parent`, `:filename`) SHALL all belong to the "path" arg-group.
+- WHEN the user inspects its default value
+- THEN "Read", "Glob", and "Grep" SHALL belong to the "read" tool-group
+- AND "Write", "Edit", "Insert", and "Mkdir" SHALL belong to the "write" tool-group
+- AND "Bash" SHALL belong to the "shell" tool-group
+- AND path-related arguments (`:file_path`, `:path`, `:parent`, `:filename`) SHALL all belong to the "path" arg-group on the tools that have them.
 
 #### Scenario: User extends groups for custom tools
 - GIVEN a user adds a custom tool "UploadFile" with arguments `:target_path` and `:content`
@@ -28,7 +28,7 @@ The system SHALL maintain a `defcustom` mapping each concrete tool name to a too
 - AND group-targeted rules SHALL NOT match this tool call.
 
 ### Requirement: Arg-Group Resolution
-When a rule targets an arg-group, the matching engine SHALL check every argument of the tool-call that belongs to that group. If any such argument's value satisfies the condition regexp, the condition is considered satisfied.
+When a rule targets an arg-group, the matching engine SHALL check every argument of the tool-call that belongs to that group. If any such argument's value satisfies the condition regexp or predicate, the condition is considered satisfied.
 
 #### Scenario: Arg-group condition matches via any grouped arg
 - GIVEN a rule targeting arg-group "path" with regexp "secret"
@@ -38,15 +38,7 @@ When a rule targets an arg-group, the matching engine SHALL check every argument
 - AND the regexp "secret" SHALL be tested against the expanded value of `:file_path`
 - AND since "/tmp/public.txt" does not match "secret", the condition SHALL fail.
 
-#### Scenario: Arg-group matches on any qualifying arg
-- GIVEN a rule targeting arg-group "path" with regexp "secret"
-- AND a tool-call for "Edit" with args `(:path "/tmp/public.txt" :old_str "foo" :new_str "bar")`
-- WHEN the engine resolves arg-group "path"
-- THEN `:path` SHALL be identified as belonging to the "path" group
-- AND since "/tmp/public.txt" does not match "secret", the condition SHALL fail
-- AND no other args belong to "path", so the condition fails.
-
-#### Scenario: Multiple args in same arg-group
+#### Scenario: Multiple args in same arg-group — any-match semantics
 - GIVEN a rule targeting arg-group "path" with regexp "secret"
 - AND a tool-call for "Write" with args `(:path "/tmp" :filename "secret.txt" :content "hello")`
 - WHEN the engine resolves arg-group "path"
@@ -55,13 +47,14 @@ When a rule targets an arg-group, the matching engine SHALL check every argument
 - AND the condition SHALL succeed regardless of `:path` not matching.
 
 ### Requirement: Rule Target Resolution Precedence
-When a rule specifies both a concrete target and a group target, the concrete target SHALL take precedence.
+When a rule specifies both a concrete target and a group target, the concrete target SHALL take precedence and a warning SHALL be emitted.
 
 #### Scenario: Concrete tool name overrides tool-group
 - GIVEN a rule with `:tool "Read"` and `:tool-group "write"`
 - WHEN the engine matches this rule
 - THEN the `:tool` key SHALL be used for matching
-- AND the `:tool-group` key SHALL be ignored.
+- AND the `:tool-group` key SHALL be ignored
+- AND a warning SHALL be logged.
 
 #### Scenario: Explicit arg-key overrides arg-group in a condition
 - GIVEN a rule condition `(:file_path . "secret")` where `:file_path` is a concrete argument key
@@ -71,7 +64,7 @@ When a rule specifies both a concrete target and a group target, the concrete ta
 - EVEN IF `:file_path` also belongs to an arg-group.
 
 ### Requirement: Tool-Group Defaults Defcustom
-The system SHALL provide `gptel-permit-tool-groups` as a defcustom mapping tool names to plists of `(:tool-group <name> :arg-groups ((<arg-key> . <group-name>) ...))`.
+The system SHALL provide `gptel-permit-tool-groups` as a `defcustom` mapping tool names to plists of `(:tool-group <name> :arg-groups ((<arg-key> . <group-name>) ...))`.
 
 #### Scenario: Validating the defcustom type
 - GIVEN the `gptel-permit-tool-groups` defcustom

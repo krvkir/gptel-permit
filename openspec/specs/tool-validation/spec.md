@@ -1,7 +1,7 @@
 # Tool Validation Specification
 
 ## Purpose
-Validate tool calls structurally before permission rules are evaluated: ensure the tool is known, required arguments are present, and provided argument names match the tool specification. This capability moves from `gptel-agent-tools.el` into `gptel-permit.el`.
+Validate tool calls structurally before permission rules are evaluated: ensure the tool is known, required arguments are present, and provided argument names match the tool specification.
 
 ## Requirements
 
@@ -25,14 +25,14 @@ When a tool call names a tool not known to gptel, the validation hook SHALL retu
 When a tool call omits a non-optional argument (value is nil or `:json-false`), the validation hook SHALL return `:block` with a structured error listing all missing arguments.
 
 #### Scenario: Required argument missing
-- GIVEN the gptel tool "Read" has required args `:file_path` and optional args `:start_line`, `:end_line`
+- GIVEN a tool has required args `:file_path` and optional args `:start_line`, `:end_line`
 - AND a tool call has `:args (:start_line 10 :end_line 20)` — missing `:file_path`
 - WHEN the validation hook processes this tool call
 - THEN it SHALL detect that `:file_path` is missing
 - AND return `(:block "<error message listing missing args>")`.
 
 #### Scenario: All required arguments present
-- GIVEN the gptel tool "Grep" has required args `:regex`, `:path`
+- GIVEN a tool has required args `:regex`, `:path`
 - AND a tool call has `:args (:regex "foo" :path "/tmp")`
 - WHEN the validation hook processes this tool call
 - THEN it SHALL find no missing required args
@@ -42,12 +42,12 @@ When a tool call omits a non-optional argument (value is nil or `:json-false`), 
 When a tool call provides argument names not present in the tool spec, the validation hook SHALL return `:block` with a fuzzy "did you mean?" hint suggesting the closest matching spec argument name.
 
 #### Scenario: Typo in argument name
-- GIVEN the gptel tool "Read" has spec args named `file_path`, `start_line`, `end_line`
+- GIVEN a tool has spec arg names `file_path`, `start_line`, `end_line`
 - AND a tool call has `:args (:file_paht "foo.txt" :start_line 1)`
 - WHEN the validation hook processes this tool call
 - THEN it SHALL detect that `file_paht` is not a valid arg name
-- AND find that `file_path` is the closest match (Levenshtein/edit distance ≤ 8, shared substring)
-- AND include a hint `"You provided 'file_paht' — did you mean 'file_path'?"` in the :block error.
+- AND find that `file_path` is the closest match (edit distance ≤ 8, shared substring)
+- AND include a hint `"You provided 'file_paht' — did you mean 'file_path'?"` in the `:block` error.
 
 #### Scenario: Multiple typos detected
 - GIVEN a tool call with two unknown args and one missing required arg
@@ -67,8 +67,8 @@ The validation hook SHALL be registered on `gptel-pre-tool-call-functions` befor
 #### Scenario: Ordering in the hook list
 - GIVEN `gptel-pre-tool-call-functions` is evaluated
 - WHEN the hook runs
-- THEN `gptel-permit--validate-tool-args` SHALL be called before `gptel-permit-pre-tool-security-hook`
-- AND if validation returns `:block`, the security hook SHALL skip the tool call (see early-return guard requirement).
+- THEN the validation function SHALL be called before the security function
+- AND if validation returns `:block`, the security hook SHALL skip the tool call via the early-return guard.
 
 ### Requirement: Validation Logging
 When `gptel-permit-log-enabled` is non-nil, the validation hook SHALL log each check (unknown tool, missing args, unknown args, pass).

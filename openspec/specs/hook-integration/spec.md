@@ -1,19 +1,28 @@
 # Hook Integration Specification
 
 ## Purpose
-Define how gptel-permit integrates with the gptel tool-call pipeline: hook registration, return value semantics, keybinding, and the simplified Layer 2 contract (tools use boolean `:confirm` only, all logic lives in gptel-permit).
+Define how gptel-permit integrates with the gptel tool-call pipeline: minor mode with clean load/unload, hook registration, return value semantics, keybinding, and the relationship with tool-level `:confirm` slots.
 
 ## Requirements
 
-### Requirement: Hook Registration
-gptel-permit SHALL register its two hook functions on `gptel-pre-tool-call-functions` at load time, in order: validation first, security/permissions second.
+### Requirement: Minor Mode
+gptel-permit SHALL define a minor mode `gptel-permit-mode` that, when enabled, registers the validation and security hooks on `gptel-pre-tool-call-functions` and binds `C-c C-b` in `gptel-tool-call-actions-map`. When disabled, it SHALL remove all registrations.
 
-#### Scenario: Both hooks registered on load
-- GIVEN `(require 'gptel-permit)` is evaluated
-- WHEN load completes
-- THEN `gptel-pre-tool-call-functions` SHALL contain `gptel-permit--validate-tool-args`
-- AND `gptel-pre-tool-call-functions` SHALL contain `gptel-permit-pre-tool-security-hook`
-- AND the validation function SHALL appear before the security function in the hook list.
+#### Scenario: Mode enabled adds hooks and keybinding
+- GIVEN `gptel-permit-mode` is toggled on
+- THEN `gptel-permit--validate-tool-args` SHALL be added to `gptel-pre-tool-call-functions`
+- AND `gptel-permit-pre-tool-security-hook` SHALL be added to `gptel-pre-tool-call-functions`
+- AND the validation function SHALL appear before the security function in the hook list
+- AND `C-c C-b` SHALL be bound to `gptel-permit-confirm-or-add-rule` in `gptel-tool-call-actions-map`.
+
+#### Scenario: Mode disabled removes hooks and keybinding
+- GIVEN `gptel-permit-mode` is toggled off
+- THEN both hook functions SHALL be removed from `gptel-pre-tool-call-functions`
+- AND `C-c C-b` SHALL be unbound from `gptel-tool-call-actions-map` (or restored to previous binding).
+
+#### Scenario: Recommended activation via gptel-mode-hook
+- GIVEN the user wants gptel-permit active whenever gptel is active
+- THEN the README SHALL recommend `(add-hook 'gptel-mode-hook #'gptel-permit-mode)`.
 
 ### Requirement: Hook Input Plist
 Both hook functions SHALL receive a plist with keys `:name`, `:args`, `:buffer`, `:backend`, `:model` as provided by gptel's `gptel--handle-pre-tool`.
@@ -45,59 +54,53 @@ Hook functions SHALL return nil or a plist with keys from the set `:confirm`, `:
 - THEN the gptel FSM SHALL store `:confirm t` on the tool-call
 - AND the user SHALL be prompted regardless of the tool's `:confirm` slot.
 
-#### Scenario: Security hook returns nil (defer to Layer 2)
+#### Scenario: Security hook returns nil (defer to tool's :confirm)
 - GIVEN no rule matches
 - WHEN the security hook returns nil
 - THEN the gptel FSM SHALL fall through to the tool's `:confirm` slot
 - AND if the tool's `:confirm` is t, the user SHALL be prompted
-- AND if the tool's `:confirm` is nil, the tool SHALL auto-execute.
+- AND if the tool's `:confirm` is nil (or absent), the tool SHALL auto-execute.
+
+### Requirement: Precedence Over Tool-Level :confirm
+When gptel-permit's hook returns `(:confirm nil)` or `(:confirm t)`, this SHALL override whatever the tool's individual `:confirm` slot specifies, per the gptel hook protocol.
+
+#### Scenario: Hook overrides tool :confirm
+- GIVEN a tool has `:confirm t` (always prompt)
+- AND a gptel-permit rule matches with action `allow`
+- WHEN the hook returns `(:confirm nil)`
+- THEN the tool SHALL auto-execute without prompt
+- AND the tool's `:confirm t` SHALL be ignored.
+
+#### Scenario: Tool :confirm lambda still runs on fallback
+- GIVEN a tool has `:confirm` as a lambda function
+- AND no gptel-permit rule matches
+- WHEN the hook returns nil
+- THEN the gptel FSM SHALL invoke the tool's `:confirm` lambda normally
+- AND the lambda's return value SHALL determine confirmation.
 
 ### Requirement: Keybinding
-gptel-permit SHALL bind `C-c C-b` in `gptel-tool-call-actions-map` to `gptel-permit-confirm-or-add-rule`.
+gptel-permit-mode SHALL bind `C-c C-b` in `gptel-tool-call-actions-map` to `gptel-permit-confirm-or-add-rule`.
 
 #### Scenario: Interactive rule creation via keybinding
 - GIVEN a tool-call confirmation overlay is displayed to the user
+- AND `gptel-permit-mode` is active
 - WHEN the user presses `C-c C-b`
 - THEN `gptel-permit-confirm-or-add-rule` SHALL be invoked
 - AND the user SHALL be prompted to select a tool call, argument, regexp, and action
 - AND the new rule SHALL be added to `gptel-permit-rules`
 - AND it SHALL be applied immediately to pending tool calls.
 
-#### Scenario: Rule creation when called without prefix arg
-- GIVEN the user invokes `gptel-permit-confirm-or-add-rule` (e.g., via `C-c C-b`)
-- AND no prefix arg was given
-- THEN the function SHALL NOT require a prefix arg to enter rule-creation mode
-- AND SHALL proceed to prompt for tool/arg/regexp/action selection.
+### Requirement: Default Global Rules
+The README SHALL document a recommended set of `gptel-permit-global-rules` that users can add to their configuration. These rules SHALL include:
 
-### Requirement: Simplified Layer 2 Contract
-gptel-agent-tools.el SHALL define `:confirm` slots as boolean values only: `t` for tools that touch the filesystem, absent for others. No lambda functions, no `should-confirm-p`, no `should-confirm-write-p`, no `auto-confirm-writes`. All auto-confirm logic SHALL live in gptel-permit's rule engine.
+- A rule matching path traversal (`".."` or leading `"/"`) on the "write" tool-group's "path" arg-group with action `ask`.
+- A rule matching `:inside-project` on "read" tool-group's "path" arg-group with action `allow`.
+- A rule matching `:inside-project` on "write" tool-group's "path" arg-group with action `ask`.
+- A rule matching `:inside-protected-dirs` on the "path" arg-group with /no tool-group restriction/ (matches all tools) with action `ask`.
 
-#### Scenario: File-accessing tool has :confirm t
-- GIVEN a tool like "Read" that accesses files
-- WHEN defined via `gptel-make-tool`
-- THEN its `:confirm` slot SHALL be `t`
-- AND no lambda SHALL be present.
-
-#### Scenario: Non-file tool has no :confirm
-- GIVEN a tool like "Bash" that executes commands
-- WHEN defined via `gptel-make-tool`
-- THEN its `:confirm` slot SHALL be absent (or nil)
-- AND the gptel FSM SHALL treat this as no confirmation by default.
-
-#### Scenario: gptel-permit not installed — safe default
-- GIVEN gptel-permit is not installed
-- AND a file-accessing tool has `:confirm t`
-- WHEN the LLM requests a tool call
-- THEN the gptel FSM SHALL prompt the user for every file-accessing tool call
-- AND this SHALL be the safe default behavior.
-
-### Requirement: Protected Directories Defcustom
-gptel-permit SHALL define `gptel-permit-protected-dirs` as a `defcustom` listing directories that trigger confirmation even for paths inside the project.
-
-#### Scenario: Protected directory always prompts
-- GIVEN `gptel-permit-protected-dirs` is `("~/.ssh/")`
-- AND a tool call targets a path inside "~/.ssh/"
-- AND `gptel-permit-global-rules` has no explicit allow rule for this path
-- WHEN the rule engine evaluates the `:inside-protected-dirs` predicate in a deny or ask rule
-- THEN the call SHALL either be denied or prompt the user
-- AND SHALL NOT be auto-approved by a generic inside-project allow rule.
+#### Scenario: Protected-dirs rule applies to any tool
+- GIVEN a global rule `(:conditions ((:arg-group "path" . :inside-protected-dirs)) :action ask)` with no `:tool` or `:tool-group` key
+- AND any tool call with a path argument pointing inside a protected directory
+- WHEN the rule engine evaluates this rule
+- THEN the absence of `:tool`/`:tool-group` SHALL mean "match any tool"
+- AND the rule SHALL fire regardless of which tool made the call.

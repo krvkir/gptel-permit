@@ -6,7 +6,15 @@ Match tool calls against permission rules, supporting both concrete tool/arg tar
 ## Requirements
 
 ### Requirement: Rule Structure
-A rule SHALL be a plist with keys `:tool`, `:tool-group`, `:conditions`, and `:action`. `:conditions` SHALL be an alist of `(TARGET . VALUE)` pairs where TARGET is a keyword (concrete arg key, e.g. `:file_path`, or arg-group keyword e.g. `:arg-group`) and VALUE is either a regexp string or a predicate keyword.
+A rule SHALL be a plist with keys `:tool`, `:tool-group`, `:conditions`, and `:action`.
+
+`:conditions` SHALL be an alist of `(TARGET . VALUE)` pairs where:
+- TARGET is either a concrete arg keyword (e.g. `:file_path`) or the keyword `:arg-group`.
+- VALUE is either a regexp string or a predicate keyword.
+
+When `:tool` and `:tool-group` are both present in a rule, `:tool` SHALL take precedence and a warning SHALL be emitted.
+
+When neither `:tool` nor `:tool-group` is present, the rule SHALL match any tool.
 
 #### Scenario: Concrete tool rule with regexp condition
 - GIVEN the rule `(:tool "Bash" :conditions ((:command . "^openspec [^&|;]*$")) :action allow)`
@@ -22,14 +30,19 @@ A rule SHALL be a plist with keys `:tool`, `:tool-group`, `:conditions`, and `:a
 - AND test regexp "secret" against "/tmp/secret.txt" → match
 - AND return `deny`.
 
-#### Scenario: Predicate condition
-- GIVEN the rule `(:tool-group "write" :conditions ((:arg-group "path" . :outside-project)) :action ask)`
-- AND a tool call for "Edit" with `:path "/etc/hosts"`
-- WHEN the rule engine evaluates the condition
-- THEN the VALUE `:outside-project` SHALL be recognized as a predicate keyword (not a regexp)
-- AND the predicate resolver SHALL call the appropriate function with the expanded path
-- AND since "/etc/hosts" is outside the current project, the predicate SHALL return non-nil
-- AND the condition SHALL match.
+#### Scenario: Both :tool and :tool-group present
+- GIVEN the rule `(:tool "Read" :tool-group "write" :conditions ((:file_path . "secret")) :action deny)`
+- WHEN the rule engine evaluates this rule
+- THEN it SHALL use `:tool "Read"`
+- AND SHALL ignore `:tool-group "write"`
+- AND SHALL emit a warning about the ambiguity.
+
+#### Scenario: No tool or tool-group restriction
+- GIVEN the rule `(:conditions ((:arg-group "path" . :inside-protected-dirs)) :action ask)`
+- AND a tool call for "Read" (any tool) with a path in a protected directory
+- WHEN the rule engine evaluates this rule
+- THEN the absence of `:tool` and `:tool-group` SHALL mean "match any tool"
+- AND the rule SHALL fire.
 
 ### Requirement: Predicate Conditions
 The system SHALL support built-in predicate keywords that are resolved at match time by calling functions with access to buffer context.
@@ -67,7 +80,7 @@ When the predicate keyword does not match any built-in, the condition SHALL fail
 - AND the predicate SHALL return t.
 
 ### Requirement: Match Algorithm — First Match Wins
-The rule engine SHALL apply `cl-some` over the concatenation `(append session-rules global-rules)` and return the action of the first rule where all conditions match.
+The rule engine SHALL evaluate rules in order: session-local rules (`gptel-permit-rules`) first, then global rules (`gptel-permit-global-rules`). The action of the /first/ rule where all conditions match SHALL be returned. No further rules SHALL be evaluated after a match.
 
 #### Scenario: Session rule overrides global rule
 - GIVEN `gptel-permit-rules` contains `(:tool "Read" :conditions ((:file_path . "logs")) :action allow)`
@@ -107,6 +120,17 @@ When an argument with path semantics has a nil value, any condition targeting it
 - THEN the value nil SHALL cause the condition to fail
 - AND the rule SHALL NOT match.
 
+### Requirement: Path Traversal as Default Rule
+The hard-coded path traversal check for Write/Mkdir (`".."` and leading `"/"`) SHALL be removed. Traversal detection SHALL be part of the recommended default rules in `gptel-permit-global-rules`.
+
+#### Scenario: Traversal detected via rule
+- GIVEN a default global rule `(:tool-group "write" :conditions ((:arg-group "path" . "^\\\\.\\\\.|^/")) :action ask)`
+- AND a Write tool call with `:filename "../etc/passwd"`
+- WHEN the engine evaluates rules
+- THEN the rule SHALL match
+- AND the action SHALL be `ask` (prompt the user)
+- AND the call SHALL NOT be silently blocked.
+
 ### Requirement: Diagnostic Logging
 When `gptel-permit-log-enabled` is non-nil, the rule engine SHALL log the full resolution chain for each rule evaluation, including tool-group and arg-group expansions, regexp matches, and predicate resolutions.
 
@@ -114,22 +138,11 @@ When `gptel-permit-log-enabled` is non-nil, the rule engine SHALL log the full r
 - GIVEN `gptel-permit-log-enabled` is t
 - AND a rule targeting tool-group "read"
 - WHEN matched against a "Read" tool call
-- THEN the log SHALL contain `Tool "Read" (group "read") matched by rule targeting tool-group "read"`
+- THEN the log SHALL contain information showing "Read" resolves to tool-group "read"
 - AND for each condition the log SHALL show the arg resolved through its arg-group.
 
-### Requirement: Hard Security Guard Elimination
-The hard-coded path traversal check for Write/Mkdir (`".."` and leading `"/"`) SHALL be removed from the hook function. Traversal detection SHALL be implemented as default rules in `gptel-permit-global-rules`.
-
-#### Scenario: Traversal detected via rule
-- GIVEN a default global rule `(:tool-group "write" :conditions ((:arg-group "path" . "^\\.\\.|^/")) :action ask)`
-- AND a Write tool call with `:filename "../etc/passwd"`
-- WHEN the engine evaluates rules
-- THEN the rule SHALL match
-- AND the action SHALL be `ask` (prompt the user)
-- AND the call SHALL NOT be silently blocked.
-
 ### Requirement: Early Return Guard
-The security hook function SHALL skip tool calls that already have `:result` or `:error` set (i.e., already processed by an earlier hook function).
+The security hook function SHALL skip tool calls that already have `:result` or `:error` set (i.e., already processed by an earlier hook function such as validation).
 
 #### Scenario: Skipping already-processed tool call
 - GIVEN the validation hook (earlier on the same hook) returned `:block` for a tool call, setting `:result` on it
