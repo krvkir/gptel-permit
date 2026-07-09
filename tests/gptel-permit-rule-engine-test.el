@@ -9,8 +9,7 @@
 
 (ert-deftest gptel-permit-rule-tool-group-match ()
   "Rule targeting a tool-group matches any tool in that group."
-  (let ((rule '(:tool-group read :conditions ((:file_path . "secret")) :action deny))
-        (gptel-permit-rules (list '(:tool-group read :conditions ((:file_path . "secret")) :action deny))))
+  (let ((rule '(:tool-group read :conditions ((:file_path . "secret")) :action deny)))
     ;; Read belongs to "read" group → matches
     (should (eq (gptel-permit--match-rule-p rule "Read" '(:file_path "/tmp/secret.txt"))
                 'deny))
@@ -64,19 +63,21 @@
                 'allow))))
 
 ;; -------------------------------------------------------------------
-;; No tool/tool-group: matches any tool
+;; No tool/tool-group: matches any tool with matching args
 ;; -------------------------------------------------------------------
 
 (ert-deftest gptel-permit-rule-no-tool-restriction ()
-  "A rule with no :tool or :tool-group matches any tool."
-  (let ((rule '(:conditions ((:arg-group path . :inside-protected-dirs)) :action ask)))
-    (should (eq (gptel-permit--match-rule-p rule "Read" '(:file_path "/home/user/.ssh/config"))
+  "A rule with no :tool or :tool-group matches any tool with matching args."
+  (let ((gptel-permit-protected-dirs '("~/.ssh/" "~/.gnupg/"))
+        (default-directory "/home/user/")
+        (rule '(:conditions ((:arg-group path . :inside-protected-dirs)) :action ask)))
+    (should (eq (gptel-permit--match-rule-p rule "Read" '(:file_path "~/.ssh/config"))
                 'ask))
-    (should (eq (gptel-permit--match-rule-p rule "Write" '(:path "/home/user/.ssh/authorized_keys"
+    (should (eq (gptel-permit--match-rule-p rule "Write" '(:path "~/.ssh/authorized_keys"
                                                                :filename "x" :content ""))
                 'ask))
-    (should (eq (gptel-permit--match-rule-p rule "Bash" '(:command "ls"))
-                'ask))))
+    ;; Bash has no path-group args, so the condition fails → no match
+    (should (null (gptel-permit--match-rule-p rule "Bash" '(:command "ls"))))))
 
 ;; -------------------------------------------------------------------
 ;; Predicate conditions
@@ -84,7 +85,7 @@
 
 (ert-deftest gptel-permit-rule-predicate-inside-project ()
   "Predicate :inside-project resolves correctly."
-  (let ((default-directory "/tmp/test-project/")
+  (let ((default-directory temporary-file-directory)
         (rule '(:tool-group read :conditions ((:arg-group path . :inside-project)) :action allow)))
     ;; File inside project
     (should (eq (gptel-permit--match-rule-p rule "Read" '(:file_path "src/main.el")) 'allow))
@@ -93,7 +94,7 @@
 
 (ert-deftest gptel-permit-rule-predicate-outside-project ()
   "Predicate :outside-project resolves correctly."
-  (let ((default-directory "/tmp/test-project/")
+  (let ((default-directory temporary-file-directory)
         (rule '(:tool-group read :conditions ((:arg-group path . :outside-project)) :action ask)))
     ;; File outside project
     (should (eq (gptel-permit--match-rule-p rule "Read" '(:file_path "/etc/hosts")) 'ask))
@@ -159,21 +160,22 @@
 ;; -------------------------------------------------------------------
 
 (ert-deftest gptel-permit-rule-path-traversal-detected ()
-  "Default rule catches '..' in a path argument."
-  (let ((rule '(:tool-group write :conditions ((:arg-group path . "^\\\\.\\\\.|^/")) :action ask)))
-    (should (eq (gptel-permit--match-rule-p rule "Write"
-                                            '(:path "/tmp" :filename "../etc/passwd" :content "x"))
+  "Path traversal predicate catches '..' and leading '/' in filename/name args."
+  (let ((rule-filename '(:tool "Write" :conditions ((:filename . :path-traversal)) :action ask))
+        (rule-name '(:tool "Mkdir" :conditions ((:name . :path-traversal)) :action ask)))
+    (should (eq (gptel-permit--match-rule-p rule-filename "Write"
+                                            '(:path "/tmp" :filename "/etc/passwd" :content "x"))
                 'ask))
-    (should (eq (gptel-permit--match-rule-p rule "Mkdir"
-                                            '(:parent "/tmp" :name "/etc/secret"))
+    (should (eq (gptel-permit--match-rule-p rule-name "Mkdir"
+                                            '(:parent "/tmp" :name "../secret"))
                 'ask))))
 
 (ert-deftest gptel-permit-rule-path-traversal-normal-path-passes ()
-  "Normal relative paths do not trigger traversal rule."
-  (let ((rule '(:tool-group write :conditions ((:arg-group path . "^\\\\.\\\\.|^/")) :action ask)))
-    (should (null (gptel-permit--match-rule-p rule "Write"
+  "Normal filenames do not trigger traversal predicate."
+  (let ((rule-trav '(:tool-group write :conditions ((:filename . :path-traversal)) :action ask)))
+    (should (null (gptel-permit--match-rule-p rule-trav "Write"
                                               '(:path "/tmp" :filename "safe.txt" :content "x"))))
-    (should (null (gptel-permit--match-rule-p rule "Mkdir"
+    (should (null (gptel-permit--match-rule-p rule-trav "Mkdir"
                                               '(:parent "/tmp" :name "subdir"))))))
 
 (provide 'gptel-permit-rule-engine-test)

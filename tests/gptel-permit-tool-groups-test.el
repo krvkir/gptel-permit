@@ -9,7 +9,7 @@
 
 (ert-deftest gptel-permit-tool-groups-mapping-defaults ()
   "Default tool-group mapping covers known gptel-agent tools."
-  (should (gptel-permit-tool-groups))
+  (should gptel-permit-tool-groups)
   ;; Read, Glob, Grep → "read" group
   (should (equal (gptel-permit--resolve-tool-group "Read") 'read))
   (should (equal (gptel-permit--resolve-tool-group "Glob") 'read))

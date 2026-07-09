@@ -8,7 +8,8 @@
 ;; -------------------------------------------------------------------
 
 (ert-deftest gptel-permit-mode-enable-adds-hooks ()
-  "Enabling gptel-permit-mode adds hook functions."
+  "Enabling gptel-permit-mode adds hook functions in correct order."
+  (gptel-permit-mode -1)
   (unwind-protect
       (progn
         (gptel-permit-mode 1)
@@ -16,7 +17,6 @@
                       gptel-pre-tool-call-functions))
         (should (memq #'gptel-permit-pre-tool-security-hook
                       gptel-pre-tool-call-functions))
-        ;; Validation must come before security in the hook list
         (let ((pos-validate (cl-position #'gptel-permit--validate-tool-args
                                          gptel-pre-tool-call-functions))
               (pos-security (cl-position #'gptel-permit-pre-tool-security-hook
@@ -28,6 +28,7 @@
 
 (ert-deftest gptel-permit-mode-disable-removes-hooks ()
   "Disabling gptel-permit-mode removes hook functions."
+  (gptel-permit-mode -1)
   (gptel-permit-mode 1)
   (gptel-permit-mode -1)
   (should (not (memq #'gptel-permit--validate-tool-args
@@ -37,6 +38,7 @@
 
 (ert-deftest gptel-permit-mode-enable-binds-key ()
   "Enabling gptel-permit-mode binds C-c C-b in gptel-tool-call-actions-map."
+  (gptel-permit-mode -1)
   (unwind-protect
       (progn
         (gptel-permit-mode 1)
@@ -46,6 +48,7 @@
 
 (ert-deftest gptel-permit-mode-disable-unbinds-key ()
   "Disabling gptel-permit-mode removes the keybinding."
+  (gptel-permit-mode -1)
   (gptel-permit-mode 1)
   (gptel-permit-mode -1)
   (should (not (eq (lookup-key gptel-tool-call-actions-map (kbd "C-c C-b"))
@@ -53,6 +56,7 @@
 
 (ert-deftest gptel-permit-mode-idempotent ()
   "Enabling twice does not duplicate hooks."
+  (gptel-permit-mode -1)
   (unwind-protect
       (progn
         (gptel-permit-mode 1)
@@ -73,9 +77,11 @@
 
 (ert-deftest gptel-permit-hook-return-confirm-nil ()
   "Hook returning (:confirm nil) auto-approves the tool."
-  (let ((result (gptel-permit-pre-tool-security-hook
-                 (list :name "Bash" :args '(:command "ls")))))
-    (should (equal result '(:confirm nil)))))
+  (let ((gptel-permit-rules
+         '((:tool "Bash" :conditions ((:command . "ls")) :action allow))))
+    (let ((result (gptel-permit-pre-tool-security-hook
+                   (list :name "Bash" :args '(:command "ls")))))
+      (should (equal result '(:confirm nil))))))
 
 (ert-deftest gptel-permit-hook-return-block ()
   "Hook returning :block stops the tool call with an error message."
@@ -106,8 +112,6 @@
   "Hook :confirm return overrides whatever the tool's :confirm slot says."
   (let ((gptel-permit-rules
          '((:tool "Read" :conditions ((:file_path . ".*")) :action allow))))
-    ;; Even though Read tool might have :confirm t in gptel-agent,
-    ;; the hook returning (:confirm nil) must win.
     (should (equal (gptel-permit-pre-tool-security-hook
                     (list :name "Read" :args '(:file_path "foo.txt")))
                    '(:confirm nil)))))

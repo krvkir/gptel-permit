@@ -38,19 +38,23 @@
     (should (null (gptel-permit--match-rule-p rule "Read" '(:file_path "/tmp/public.txt" :start_line 10))))))
 
 (ert-deftest gptel-permit-security-hook ()
-  "Test security-hook behavior, including hard security blocks and prioritization."
+  "Test security-hook behavior via rules and prioritization."
   (let ((gptel-permit-rules nil)
         (gptel-permit-global-rules nil))
 
-    ;; 1. Hard Security Guard: Path traversal on Write tool
-    (let ((write-traversal (list :name "Write" :args '(:path "/tmp" :filename "../etc/passwd" :content "foo"))))
-      (should (equal (plist-get (gptel-permit-pre-tool-security-hook write-traversal) :block)
-                     "Security Violation: Path traversal elements ('..' or leading '/') are strictly prohibited.")))
+    ;; 1. Relative path traversal caught by :outside-project predicate
+    (let ((gptel-permit-global-rules
+           '((:tool-group write :conditions ((:arg-group path . :path-traversal)) :action ask)))
+          (write-traversal (list :name "Write" :args '(:path "/tmp" :filename "../etc/passwd" :content "foo"))))
+      (should (equal (gptel-permit-pre-tool-security-hook write-traversal)
+                     '(:confirm t))))
 
-    ;; 2. Hard Security Guard: Absolute path on Write tool filename
-    (let ((write-absolute (list :name "Write" :args '(:path "/tmp" :filename "/etc/passwd" :content "foo"))))
-      (should (equal (plist-get (gptel-permit-pre-tool-security-hook write-absolute) :block)
-                     "Security Violation: Path traversal elements ('..' or leading '/') are strictly prohibited.")))
+    ;; 2. Absolute path on Write tool filename — caught by ^/ regexp
+    (let ((gptel-permit-global-rules
+           '((:tool-group write :conditions ((:arg-group path . :path-traversal)) :action ask)))
+          (write-absolute (list :name "Write" :args '(:path "/tmp" :filename "/etc/passwd" :content "foo"))))
+      (should (equal (gptel-permit-pre-tool-security-hook write-absolute)
+                     '(:confirm t))))
 
     ;; 3. Matching Session Rule (allow)
     (let ((gptel-permit-rules

@@ -16,4 +16,8 @@ test: clean
 		-L . \
 		-L ./tests \
 		-l gptel-permit-test.el \
+		-l gptel-permit-tool-groups-test.el \
+		-l gptel-permit-rule-engine-test.el \
+		-l gptel-permit-validation-test.el \
+		-l gptel-permit-hook-integration-test.el \
 		-f ert-run-tests-batch-and-exit
