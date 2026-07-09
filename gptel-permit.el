@@ -92,23 +92,31 @@ Default rules:
 Customize this variable or override it in your init file."
   :type '(repeat
           (plist :key-type symbol
-                 :options (((:tool string)
-                            (:tool-group symbol)
-                            (:arg-group symbol)
-                            (:conditions
-                             (repeat
-                              (cons
-                               (choice (const :arg-group)
-                                       (keyword :tag "Argument key"))
-                               (choice (string :tag "Regexp")
-                                       (const :inside-project)
-                                       (const :outside-project)
-                                       (const :inside-protected-dirs)
-                                       (const :path-traversal)))))
-                            (:action
-                             (choice (const :tag "Allow (auto-approve)" allow)
-                                     (const :tag "Deny (auto-block)" deny)
-                                     (const :tag "Ask (prompt user)" ask)))))))
+                 :value-type sexp
+                 :options ((:tool string)
+                           (:tool-group symbol)
+                           (:conditions
+                            (repeat
+                             (cons
+                              (choice (const :arg-group)
+                                      (symbol :tag "Argument key"))
+                              (choice
+                               (cons :tag "Group condition"
+                                     (symbol :tag "Group name")
+                                     (choice (string :tag "Regexp")
+                                             (const :inside-project)
+                                             (const :outside-project)
+                                             (const :inside-protected-dirs)
+                                             (const :path-traversal)))
+                               (string :tag "Regexp")
+                               (const :inside-project)
+                               (const :outside-project)
+                               (const :inside-protected-dirs)
+                               (const :path-traversal)))))
+                           (:action
+                            (choice (const :tag "Allow (auto-approve)" allow)
+                                    (const :tag "Deny (auto-block)" deny)
+                                    (const :tag "Ask (prompt user)" ask))))))
   :group 'gptel-permit)
 
 (defvar-local gptel-permit-rules nil
