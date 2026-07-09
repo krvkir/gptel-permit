@@ -3,6 +3,23 @@
 ;; Copyright (C) 2026 krvkir
 
 ;; Author: krvkir <krvkir@gmail.com>
+;; Version: 0.0.1
+;; Package-Requires: ((emacs "29.1") (gptel "0.9.9"))
+;; Keywords: convenience, tools, agents, hypermedia
+;; URL: https://github.com/krvkir/gptel-permit
+
+;; This file is NOT part of GNU Emacs.
+
+;;; Commentary:
+;; This file provides a permission rule system for gptel tools.
+;; Rules can be defined globally via custom variables or interactively
+;; per session (buffer-local).
+
+;;; Code:
+
+(require 'cl-lib)
+(require 'gptel)
+(require 'project)
 
 (defgroup gptel-permit nil
   "Rule-based tool-call permissions for gptel."
@@ -29,16 +46,16 @@ FORMAT-STRING and ARGS are passed to `format'."
 
 (defcustom gptel-permit-global-rules
   '((:tool-group read
-     :conditions ((:arg-group path . :inside-project))
-     :action allow)
+                 :conditions ((:arg-group path . :inside-project))
+                 :action allow)
     (:tool-group write
-     :conditions ((:arg-group path . :inside-project))
-     :action ask)
+                 :conditions ((:arg-group path . :inside-project))
+                 :action ask)
     (:tool-group write
-     :conditions ((:arg-group path . :path-traversal))
-     :action ask)
+                 :conditions ((:arg-group path . :path-traversal))
+                 :action ask)
     (:conditions ((:arg-group path . :inside-protected-dirs))
-     :action ask))
+                 :action ask))
   "Global permission rules for gptel tools.
 
 Each rule is a plist specifying matching conditions for a tool
@@ -105,8 +122,6 @@ Used by the `:inside-protected-dirs' predicate in permission rules."
   :type '(repeat directory)
   :group 'gptel-permit)
 
-
-
 (defcustom gptel-permit-tool-groups
   '(("Read"   :tool-group read   :arg-groups ((:file_path . path)))
     ("Glob"   :tool-group read   :arg-groups ((:path . path)))
@@ -139,7 +154,6 @@ before matching."
   :type '(repeat symbol)
   :group 'gptel-permit)
 
-
 (defun gptel-permit--resolve-tool-group (tool-name)
   "Resolve TOOL-NAME to its tool-group symbol, or nil."
   (when-let* ((entry (assoc tool-name gptel-permit-tool-groups #'equal)))
@@ -154,7 +168,6 @@ Returns nil for tools not in the mapping."
 (defun gptel-permit--arg-group-path-p (group)
   "Return non-nil if GROUP is a path-semantic arg-group."
   (memq group gptel-permit-path-arg-groups))
-
 
 (defun gptel-permit--resolve-predicate (predicate-keyword arg-key val)
   "Resolve PREDICATE-KEYWORD for ARG-KEY with value VAL.
@@ -200,9 +213,6 @@ Checks for \"..\" or leading \"/\" in the raw (unexpanded) string value."
     (or (string-search ".." raw)
         (string-match-p "^/" raw))))
 
-
-
-
 (defun gptel-permit--normalize-arg (key val &optional tool-name)
   "Normalize argument VAL if KEY represents a file or directory path.
 Path detection uses both hardcoded path keys and path-semantic arg-groups
@@ -236,7 +246,6 @@ TOOL-NAME is used for arg normalization."
                           arg-key normalized-val regexp-or-pred
                           (if matched "SUCCESS (matched)" "FAILED (mismatch)"))
         matched))))
-
 
 (defun gptel-permit--match-condition-p (cond-cell args tool-name)
   "Check if COND-CELL is met by ARGS plist.
@@ -275,7 +284,6 @@ Return non-nil if matched, nil otherwise."
            (regexp-or-pred (cdr cond-cell)))
       (gptel-permit--match-value-p
        arg-key (plist-get args arg-key) regexp-or-pred tool-name))))
-
 
 (defun gptel-permit--match-rule-p (rule name args)
   "Check if RULE matches tool NAME and ARGS plist.
@@ -322,7 +330,6 @@ Session-local rules are checked before global rules."
     (cl-some (lambda (rule) (gptel-permit--match-rule-p rule name args))
              all-rules)))
 
-
 (defun gptel-permit--validate-error-message (name missing unknown hints spec-args)
   "Build a validation error message for tool NAME.
 MISSING is a list of missing arg names, UNKNOWN is a list of unknown
@@ -361,7 +368,7 @@ names, missing required arguments, and unknown argument names."
       (unless tool
         (gptel-permit-log "Validation: unknown tool `%s` -> blocked" name)
         (throw 'gptel-permit--validate-tool-args
-          (list :block (format "Unknown tool `%s'" name))))
+               (list :block (format "Unknown tool `%s'" name))))
       (when spec-args
         (let* ((missing '())
                (unknown '())
@@ -412,10 +419,9 @@ names, missing required arguments, and unknown argument names."
                                     (format "missing %s" (car (nreverse missing)))
                                   (format "unknown args %s" (car (nreverse unknown)))))
               (throw 'gptel-permit--validate-tool-args
-                (list :block
-                      (gptel-permit--validate-error-message
-                       name missing unknown hints spec-args))))))))))
-
+                     (list :block
+                           (gptel-permit--validate-error-message
+                            name missing unknown hints spec-args))))))))))
 
 (defun gptel-permit-pre-tool-security-hook (tool-call)
   "Enforce permission rules for TOOL-CALL.
@@ -525,7 +531,6 @@ Return a cons of (tool-call . arg-name) or nil."
     (gptel--accept-tool-calls tool-calls ov)))
 
 ;;;###autoload
-;;;###autoload
 (define-minor-mode gptel-permit-mode
   "Minor mode for rule-based tool-call permissions in gptel.
 When enabled, registers validation and permission hooks on
@@ -546,40 +551,6 @@ When enabled, registers validation and permission hooks on
     (remove-hook 'gptel-pre-tool-call-functions
                  #'gptel-permit-pre-tool-security-hook)
     (keymap-unset gptel-tool-call-actions-map "C-c C-b")))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-;; Version: 0.0.1
-;; Package-Requires: ((emacs "29.1") (gptel "0.9.9"))
-;; Keywords: convenience, tools, agents, hypermedia
-;; URL: https://github.com/krvkir/gptel-permit
-
-;; This file is NOT part of GNU Emacs.
-
-;;; Commentary:
-
-;; This file provides a permission rule system for gptel tools.
-;; Rules can be defined globally via custom variables or interactively
-;; per session (buffer-local).
-
-;;; Code:
-
-(require 'cl-lib)
-(require 'gptel)
-(require 'project)
 
 (provide 'gptel-permit)
 ;;; gptel-permit.el ends here
