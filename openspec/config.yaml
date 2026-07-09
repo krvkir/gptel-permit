@@ -1,0 +1,22 @@
+schema: spec-driven
+
+context: |
+  Project: gptel-permit
+  Domain: Emacs, gptel, LLM tool-use security
+  Tech Stack: Emacs Lisp, gptel hook protocol
+  Conventions:
+    - Focus on rule-based auto-approval/deny of LLM tool calls.
+    - Use tool-groups and arg-groups to decouple rules from concrete tool definitions.
+    - Use "SHALL" for mandatory requirements.
+    - Organize requirements by capability-based subdirectories in `openspec/specs/`.
+    - Every requirement MUST include at least one `Scenario` with GIVEN/WHEN/THEN steps.
+
+rules:
+  spec:
+    - Use capability subdirectories (e.g., `specs/rule-engine/spec.md`).
+    - Format requirements using markdown headers (### Requirement).
+    - Format scenarios using markdown headers (#### Scenario).
+  proposal:
+    - Must describe the impact on the hook pipeline and rule matching behavior.
+  tasks:
+    - Prefer small, incremental changes that keep all existing ERT tests passing.
