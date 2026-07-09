@@ -1,0 +1,130 @@
+#+title: gptel-permit: Rule-Based Tool-Call Permissions for gptel
+
+=gptel-permit= is an Emacs package that adds a permission rule system for
+[[https://github.com/karthink/gptel][gptel]] tool calls.  You define rules that match tool calls by name and
+argument patterns, and when a match occurs the tool is automatically
+approved, denied, or flagged for your attention — no manual confirmation
+required.
+
+* Installation
+
+=gptel-permit= depends on =gptel= (version 0.9.9 or later) and Emacs 29.1+.
+
+Download =gptel-permit.el= and put it somewhere in your =load-path=, then:
+
+#+begin_src elisp
+(require 'gptel-permit)
+#+end_src
+
+Or, with =use-package=:
+
+#+begin_src elisp
+(use-package gptel-permit
+  :ensure t
+  :config
+  (setq gptel-permit-global-rules
+        '((:tool "Bash"
+           :conditions ((:command . "^openspec [^&|;]*$"))
+           :action allow))))
+#+end_src
+
+* How It Works
+
+=gptel-permit= registers a function on the =gptel-pre-tool-call-functions=
+hook.  Whenever an LLM requests a tool call, =gptel-permit= checks:
+
+1. *Hard security guards*: Path traversal (=..=, leading =/=) in =Write= and
+   =Mkdir= tools is blocked unconditionally.
+
+2. *Session-local rules* (=gptel-permit-rules=): Checked first, buffer-local,
+   created interactively with =C-c C-b=.
+
+3. *Global rules* (=gptel-permit-global-rules=): Checked second, defined
+   in your configuration.
+
+If a rule matches, the corresponding action is taken:
+- ~allow~ :: Auto-accept the tool call, no prompt.
+- ~deny~ :: Block the tool call, send an error back to the LLM.
+- ~ask~ :: Force a confirmation prompt even if the tool has its own
+  ~:confirm~ function.
+
+If no rule matches, gptel's default confirmation logic runs unchanged.
+
+* Rule Format
+
+A rule is a plist:
+
+#+begin_src elisp
+(:tool "<tool-name>"
+ :conditions ((<arg-key> . "<regexp>") ...)
+ :action allow)  ;; or deny, or ask
+#+end_src
+
+All conditions in a rule must match for the action to trigger.
+
+*Example:* Allow =Bash= commands matching ~^openspec [^&|;]*$~:
+
+#+begin_src elisp
+(:tool "Bash"
+ :conditions ((:command . "^openspec [^&|;]*$"))
+ :action allow)
+#+end_src
+
+*Example:* Deny =Read= on any file whose path contains =secret=:
+
+#+begin_src elisp
+(:tool "Read"
+ :conditions ((:file_path . "secret"))
+ :action deny)
+#+end_src
+
+* Path Argument Normalization
+
+When matching conditions whose key is one of =:path=, =:file_path=,
+=:parent=, =:filepath=, or =:filename=, the value is expanded with
+=expand-file-name= before regexp matching.  This allows relative-path
+regexps to match reliably regardless of the =default-directory=.
+
+If your custom tools use different key names for path arguments, regexp
+matching will still work but without expansion.  The values will be
+converted to strings via =format=.
+
+* Interactive Use
+
+When gptel presents a batch of tool calls for confirmation, press =C-c C-b=
+to run =gptel-permit-confirm-or-add-rule=.  This prompts you to:
+
+1. Select which tool call (if there are multiple)
+2. Select which argument to match on
+3. Enter a regexp for that argument
+4. Pick an action (~allow~, ~deny~, or ~ask~)
+
+The rule is added to the current session's rules and applied immediately
+to all pending tool calls.  Denied calls are blocked, allowed calls
+execute.
+
+* Session-Local vs Global Rules
+
+- ~gptel-permit-rules~ (=defvar-local=) :: Buffer-local, survive for one
+  gptel session.  Created interactively with =C-c C-b=.  Take precedence
+  over global rules.
+
+- ~gptel-permit-global-rules~ (=defcustom=) :: Persist across sessions via
+  your init file.  Checked after session-local rules.
+
+* Debugging
+
+Set =gptel-permit-log-enabled= to =t= to write detailed rule-matching
+diagnostics into the =*gptel-permit-log*= buffer.  Each check records
+the tool call, the rule being evaluated, which conditions passed or
+failed, and the final decision.
+
+* Limitations
+
+- The hard security guard only covers =Write= and =Mkdir= tools.  If you
+  use custom tools that write files under different names, you'll need
+  to add explicit =deny= rules for them.
+
+- The overlay cleanup logic in =gptel-permit-confirm-or-add-rule=
+  duplicates code from =gptel--accept-tool-calls= (a private gptel
+  function).  If gptel changes its overlay structure, this may break.
