@@ -27,21 +27,71 @@ FORMAT-STRING and ARGS are passed to `format'."
             (insert (format-time-string "[%Y-%m-%d %H:%M:%S] ") msg "\n"))))
       (message "gptel-permit: %s" msg))))
 
-(defcustom gptel-permit-global-rules nil
+(defcustom gptel-permit-global-rules
+  '((:tool-group read
+     :conditions ((:arg-group path . :inside-project))
+     :action allow)
+    (:tool-group write
+     :conditions ((:arg-group path . :inside-project))
+     :action ask)
+    (:tool-group write
+     :conditions ((:arg-group path . :path-traversal))
+     :action ask)
+    (:conditions ((:arg-group path . :inside-protected-dirs))
+     :action ask))
   "Global permission rules for gptel tools.
-Each rule is a plist specifying matching conditions for a tool call.
-If all conditions of a rule are met, its action is performed.
-Global rules are checked after session-local rules.
 
-Example:
-  \\='((:tool \"Bash\"
-        :conditions ((:command . \"^openspec [^&|;]*$\"))
-        :action allow))"
+Each rule is a plist specifying matching conditions for a tool
+call.  If all conditions of a rule are met, its action is
+performed.  Global rules are checked after session-local rules
+(see `gptel-permit-rules').
+
+A rule may contain the following keys:
+  :tool         A concrete tool name (string).
+  :tool-group   A tool group symbol (e.g. read, write, shell).
+  :conditions   An alist of (KEY . PATTERN) pairs.
+  :action       One of allow, deny, or ask.
+
+If both :tool and :tool-group are present, :tool takes
+precedence and a warning is emitted.  If neither :tool nor
+:tool-group is present, the rule matches ANY tool.
+
+Each condition KEY can be:
+  - A concrete argument name keyword (e.g. :file_path, :command).
+  - :arg-group followed by an argument group symbol
+    (e.g. (:arg-group path . \"regexp\")).
+
+Each condition PATTERN can be:
+  - A regexp string tested against the normalized argument value.
+  - A predicate keyword (:inside-project, :outside-project,
+    :inside-protected-dirs, :path-traversal).
+
+Default rules:
+  - Auto-allow read tools accessing paths inside the project.
+  - Ask for write tools accessing paths inside the project.
+  - Ask for write tools with path-traversal (.. or absolute).
+  - Ask for any tool accessing protected directories.
+
+Customize this variable or override it in your init file."
   :type '(repeat
           (plist :key-type symbol
                  :options (((:tool string)
-                            (:conditions (repeat (cons symbol string)))
-                            (:action (choice (const allow) (const deny) (const ask)))))))
+                            (:tool-group symbol)
+                            (:arg-group symbol)
+                            (:conditions
+                             (repeat
+                              (cons
+                               (choice (const :arg-group)
+                                       (keyword :tag "Argument key"))
+                               (choice (string :tag "Regexp")
+                                       (const :inside-project)
+                                       (const :outside-project)
+                                       (const :inside-protected-dirs)
+                                       (const :path-traversal)))))
+                            (:action
+                             (choice (const :tag "Allow (auto-approve)" allow)
+                                     (const :tag "Deny (auto-block)" deny)
+                                     (const :tag "Ask (prompt user)" ask)))))))
   :group 'gptel-permit)
 
 (defvar-local gptel-permit-rules nil
@@ -54,6 +104,7 @@ Each rule is a plist of the form:
 Used by the `:inside-protected-dirs' predicate in permission rules."
   :type '(repeat directory)
   :group 'gptel-permit)
+
 
 
 (defcustom gptel-permit-tool-groups

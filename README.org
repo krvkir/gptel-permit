@@ -1,8 +1,9 @@
 #+title: gptel-permit: Rule-Based Tool-Call Permissions for gptel
 
 =gptel-permit= is an Emacs package that adds a permission rule system for
-[[https://github.com/karthink/gptel][gptel]] tool calls.  You define rules that match tool calls by name and
-argument patterns, and when a match occurs the tool is automatically
+[[https://github.com/karthink/gptel][gptel]] tool calls.  You define rules that match tool calls by name,
+tool-group, argument patterns, or argument-groups, using either regexps or
+built-in predicates.  When a match occurs the tool is automatically
 approved, denied, or flagged for your attention — no manual confirmation
 required.
 
@@ -14,33 +15,39 @@ Download =gptel-permit.el= and put it somewhere in your =load-path=, then:
 
 #+begin_src elisp
 (require 'gptel-permit)
+(add-hook 'gptel-mode-hook #'gptel-permit-mode)
 #+end_src
+
 
 Or, with =use-package=:
 
 #+begin_src elisp
 (use-package gptel-permit
   :ensure t
-  :config
-  (setq gptel-permit-global-rules
-        '((:tool "Bash"
-           :conditions ((:command . "^openspec [^&|;]*$"))
-           :action allow))))
+  :hook (gptel-mode . gptel-permit-mode))
 #+end_src
+
+The default global rules (see below) are active immediately.  You can
+inspect or customize them via ~M-x customize-variable RET
+gptel-permit-global-rules RET~.
 
 * How It Works
 
-=gptel-permit= registers a function on the =gptel-pre-tool-call-functions=
-hook.  Whenever an LLM requests a tool call, =gptel-permit= checks:
+=gptel-permit-mode= is a global minor mode that activates with =gptel-mode=.
+When enabled, it registers two functions on the
+=gptel-pre-tool-call-functions= hook and binds =C-c C-b= in
+=gptel-tool-call-actions-map= for interactive rule creation.
 
-1. *Hard security guards*: Path traversal (=..=, leading =/=) in =Write= and
-   =Mkdir= tools is blocked unconditionally.
+Whenever an LLM requests a tool call, =gptel-permit= runs:
 
-2. *Session-local rules* (=gptel-permit-rules=): Checked first, buffer-local,
-   created interactively with =C-c C-b=.
+1. *Validation*: The tool call is checked structurally — is the tool known?
+   Are required arguments present? Do argument names match the tool spec?
+   Typos in argument names get fuzzy "did you mean?" hints.  Structural
+   failures return a =:block= error to the LLM immediately.
 
-3. *Global rules* (=gptel-permit-global-rules=): Checked second, defined
-   in your configuration.
+2. *Rule matching*: Session-local rules (=gptel-permit-rules=) are checked
+   first, then global rules (=gptel-permit-global-rules=).  The /first/
+   rule where all conditions match determines the outcome.
 
 If a rule matches, the corresponding action is taken:
 - ~allow~ :: Auto-accept the tool call, no prompt.
@@ -48,21 +55,31 @@ If a rule matches, the corresponding action is taken:
 - ~ask~ :: Force a confirmation prompt even if the tool has its own
   ~:confirm~ function.
 
-If no rule matches, gptel's default confirmation logic runs unchanged.
+If no rule matches, gptel's default confirmation logic runs unchanged
+(the tool's ~:confirm~ slot, =gptel-confirm-tool-calls=, etc.).
 
 * Rule Format
 
 A rule is a plist:
 
 #+begin_src elisp
-(:tool "<tool-name>"
- :conditions ((<arg-key> . "<regexp>") ...)
- :action allow)  ;; or deny, or ask
+(:tool "<tool-name>"       ;; or :tool-group '<group-symbol>
+ :conditions ((<target> . <regexp-or-predicate>) ...)
+ :action allow)             ;; or deny, or ask
 #+end_src
+
+=target= can be one of:
+- A concrete argument keyword, e.g. ~:file_path~, ~:command~.
+- ~:arg-group~ followed by a cons of ~(GROUP-NAME . REGEXP-OR-PREDICATE)~.
+
+When neither ~:tool~ nor ~:tool-group~ is present, the rule matches any tool
+(subject to its conditions).
 
 All conditions in a rule must match for the action to trigger.
 
-*Example:* Allow =Bash= commands matching ~^openspec [^&|;]*$~:
+*Examples:*
+
+Allow =Bash= commands matching the OpenSpec pattern:
 
 #+begin_src elisp
 (:tool "Bash"
@@ -70,24 +87,112 @@ All conditions in a rule must match for the action to trigger.
  :action allow)
 #+end_src
 
-*Example:* Deny =Read= on any file whose path contains =secret=:
+Deny any tool in the ="read"= group from accessing files containing ="secret"=:
 
 #+begin_src elisp
-(:tool "Read"
- :conditions ((:file_path . "secret"))
+(:tool-group read
+ :conditions ((:arg-group path . "secret"))
  :action deny)
 #+end_src
 
-* Path Argument Normalization
+Ask for confirmation when any tool accesses a protected directory:
 
-When matching conditions whose key is one of =:path=, =:file_path=,
-=:parent=, =:filepath=, or =:filename=, the value is expanded with
-=expand-file-name= before regexp matching.  This allows relative-path
-regexps to match reliably regardless of the =default-directory=.
+#+begin_src elisp
+(:conditions ((:arg-group path . :inside-protected-dirs))
+ :action ask)
+#+end_src
 
-If your custom tools use different key names for path arguments, regexp
-matching will still work but without expansion.  The values will be
-converted to strings via =format=.
+* Tool and Argument Groups
+
+Tool-groups and arg-groups let you write rules once and have them apply
+to whole categories of tools.  The mapping is configured via
+=gptel-permit-tool-groups=:
+
+#+begin_src elisp
+;; Default mapping (already set):
+(setq gptel-permit-tool-groups
+      '(("Read"   :tool-group read   :arg-groups ((:file_path . path)))
+        ("Glob"   :tool-group read   :arg-groups ((:path . path)))
+        ("Grep"   :tool-group read   :arg-groups ((:path . path)))
+        ("Write"  :tool-group write  :arg-groups ((:path . path) (:filename . path)))
+        ("Edit"   :tool-group write  :arg-groups ((:path . path)))
+        ("Insert" :tool-group write  :arg-groups ((:path . path)))
+        ("Mkdir"  :tool-group write  :arg-groups ((:parent . path) (:name . path)))
+        ("Bash"   :tool-group shell)))
+#+end_src
+
+The ="path"= arg-group is special: its values are expanded with
+=expand-file-name= before matching.  Additional path-semantic groups can
+be added to =gptel-permit-path-arg-groups=.
+
+When a rule targets an arg-group, the condition matches if /any/ argument
+of the tool belonging to that group satisfies the regexp or predicate.
+
+* Predicate Conditions
+
+Instead of a regexp string, a condition can use a /predicate keyword/.
+Predicates are resolved at match time with access to buffer context
+(for project root, buffer-file-name, etc.).
+
+Built-in predicates:
+
+- ~:inside-project~ :: True if the normalized path is inside the current
+  project root or buffer file directory.
+- ~:outside-project~ :: True if the normalized path is outside the
+  current project root / buffer file directory, or if neither can be
+  resolved.
+- ~:inside-protected-dirs~ :: True if the normalized path is inside any
+  directory listed in =gptel-permit-protected-dirs=.
+- ~:path-traversal~ :: True if the raw argument value contains =".."=
+  or starts with =/=.  Checks the /unexpanded/ value, so relative traversal
+  and absolute paths are detected before =expand-file-name= resolves them.
+
+*Example:* Auto-allow reads inside the project, ask for writes:
+
+#+begin_src elisp
+(:tool-group read
+ :conditions ((:arg-group path . :inside-project))
+ :action allow)
+
+(:tool-group write
+ :conditions ((:arg-group path . :inside-project))
+ :action ask)
+#+end_src
+
+* Built-in Default Rules
+
+=gptel-permit-global-rules= ships with a sensible default rule set:
+
+#+begin_src elisp
+;; Read tools: allow access inside the project
+(:tool-group read
+ :conditions ((:arg-group path . :inside-project))
+ :action allow)
+
+;; Write tools: ask for confirmation inside the project
+(:tool-group write
+ :conditions ((:arg-group path . :inside-project))
+ :action ask)
+
+;; Path traversal (../..) and absolute paths → ask
+(:tool-group write
+ :conditions ((:arg-group path . :path-traversal))
+ :action ask)
+
+;; Protected directories → always ask, regardless of tool
+(:conditions ((:arg-group path . :inside-protected-dirs))
+ :action ask)
+#+end_src
+
+These are active immediately when you enable =gptel-permit-mode=.
+To change them, use =M-x customize-variable= or override the variable
+in your init file:
+
+#+begin_src elisp
+(setq gptel-permit-global-rules
+      (append '((:tool "WebSearch" :action allow))
+              gptel-permit-global-rules))
+#+end_src
 
 * Interactive Use
 
@@ -99,9 +204,9 @@ to run =gptel-permit-confirm-or-add-rule=.  This prompts you to:
 3. Enter a regexp for that argument
 4. Pick an action (~allow~, ~deny~, or ~ask~)
 
-The rule is added to the current session's rules and applied immediately
-to all pending tool calls.  Denied calls are blocked, allowed calls
-execute.
+The rule is added to the current session's rules (=gptel-permit-rules=)
+and applied immediately to all pending tool calls.  Denied calls are
+blocked with an error to the LLM, allowed calls execute.
 
 * Session-Local vs Global Rules
 
@@ -112,18 +217,36 @@ execute.
 - ~gptel-permit-global-rules~ (=defcustom=) :: Persist across sessions via
   your init file.  Checked after session-local rules.
 
-* Debugging
+* Customization Options
 
-Set =gptel-permit-log-enabled= to =t= to write detailed rule-matching
-diagnostics into the =*gptel-permit-log*= buffer.  Each check records
-the tool call, the rule being evaluated, which conditions passed or
-failed, and the final decision.
+- =gptel-permit-global-rules= :: Default rules applied to all gptel sessions.
+- =gptel-permit-tool-groups= :: Mapping from tool names to tool-groups and arg-groups.
+- =gptel-permit-path-arg-groups= :: Arg-groups whose values are expanded with
+  =expand-file-name= before matching.  Default: ~(path)~.
+- =gptel-permit-protected-dirs= :: Directories that trigger the
+  ~:inside-protected-dirs~ predicate.  Default: ~("~/.ssh/" "~/.gnupg/")~.
+- =gptel-permit-log-enabled= :: When ~t~, writes detailed rule-matching
+  diagnostics to the =*gptel-permit-log*= buffer.
+
+* Validation
+
+When =gptel-permit-mode= is active, every tool call is screened before
+rules are evaluated:
+
+- Unknown tools are blocked with an error sent to the LLM.
+- Missing required arguments are reported with the list of what was missing.
+- Typos in argument names are caught and fuzzy "did you mean?" suggestions
+  are included in the error message.
+
+This catches LLM hallucinations about tool APIs before any rule matching
+or tool execution occurs.
 
 * Limitations
 
-- The hard security guard only covers =Write= and =Mkdir= tools.  If you
-  use custom tools that write files under different names, you'll need
-  to add explicit =deny= rules for them.
+- Predicates that depend on =project-current= and =buffer-file-name= work
+  best when the gptel session buffer has an associated project.  In
+  buffers without a file or project, =:inside-project= falls back to
+  =default-directory= and =:outside-project= treats everything as outside.
 
 - The overlay cleanup logic in =gptel-permit-confirm-or-add-rule=
   duplicates code from =gptel--accept-tool-calls= (a private gptel
