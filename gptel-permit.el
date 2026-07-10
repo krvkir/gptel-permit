@@ -463,8 +463,15 @@ Returns a plist with :confirm, :block, or nil (fallback)."
   (gptel-permit--rule-action (gptel-tool-name tool-spec) arg-plist))
 
 (defun gptel-permit--select-tool-and-arg (tool-calls)
-  "Prompt the user to select a tool call from TOOL-CALLS and one of its arguments.
-Return a cons of (tool-call . arg-name) or nil."
+  "Prompt the user to select a tool call and a match target from TOOL-CALLS.
+If the selected tool belongs to a tool-group, the user is asked whether
+to match the specific tool or its tool-group.  Arguments that belong to
+an arg-group are listed at the top with an \"Argument group: \" prefix.
+
+Return a plist with keys:
+  :tool-call     The selected tool-call element (TOOL-SPEC ARG-PLIST CALLBACK).
+  :tool-match    Either :tool or :tool-group.
+  :arg-selection Either a keyword (concrete arg) or a cons (:arg-group . GROUP-SYMBOL)."
   (when tool-calls
     (let* ((tool-call
             (if (= (length tool-calls) 1)
@@ -474,44 +481,123 @@ Return a cons of (tool-call . arg-name) or nil."
                 (cl-find-if (lambda (tc) (equal (gptel-tool-name (car tc)) chosen)) tool-calls))))
            (tool-spec (car tool-call))
            (arg-plist (cadr tool-call))
+           (tool-name (gptel-tool-name tool-spec))
+           (tool-group (gptel-permit--resolve-tool-group tool-name))
+           (tool-match
+            (if tool-group
+                (let ((choice
+                       (completing-read
+                        (format "Match tool `%s' or its group `%s'? " tool-name tool-group)
+                        (list (format "Tool: %s" tool-name)
+                              (format "Tool-group: %s" tool-group))
+                        nil t)))
+                  (if (string-prefix-p "Tool-group:" choice)
+                      :tool-group
+                    :tool))
+              :tool))
+           (arg-groups (gptel-permit--resolve-arg-groups tool-name))
            (arg-names (cl-loop for key in arg-plist by #'cddr
                                collect (substring (symbol-name key) 1))))
-      (if (null arg-names)
+      (if (and (null arg-names)
+               (null arg-groups))
           (progn
-            (message "Tool %s has no arguments to match." (gptel-tool-name tool-spec))
+            (message "Tool %s has no arguments to match." tool-name)
             nil)
-        (let ((chosen-arg (completing-read "Select argument to match: " arg-names nil t)))
-          (cons tool-call (intern (concat ":" chosen-arg))))))))
+        (let* ((arg-group-entries
+                (when arg-groups
+                  (let ((groups-seen nil))
+                    (cl-loop for (arg-key . group) in arg-groups
+                             when (and (not (memq group groups-seen))
+                                       (plist-member arg-plist arg-key))
+                             collect (progn
+                                       (push group groups-seen)
+                                       (cons (format "Argument group: %s" group)
+                                             (cons :arg-group group)))))))
+               (concrete-arg-entries
+                (mapcar (lambda (name)
+                          (cons name (intern (concat ":" name))))
+                        arg-names))
+               (choices (append arg-group-entries concrete-arg-entries))
+               (chosen-display
+                (completing-read "Select argument to match: "
+                                 (mapcar #'car choices) nil t))
+               (arg-selection (cdr (assoc chosen-display choices))))
+          (list :tool-call tool-call
+                :tool-match tool-match
+                :arg-selection arg-selection))))))
 
 ;;;###autoload
 (defun gptel-permit-confirm-or-add-rule (&optional tool-calls ov)
-  "Accept tool-calls or prompt to create a rule first if called with prefix arg."
+  "Accept tool-calls or prompt to create a rule first if called with prefix arg.
+When interactively invoked via `C-c C-b', the user selects a tool call
+\(or its tool-group if applicable) and an argument (or its arg-group
+with an \"Argument group: \" prefix).  A regexp and action are then
+prompted for a new session-local rule."
   (interactive
    (pcase-let ((`(,resp . ,o) (get-char-property-and-overlay
                                (point) 'gptel-tool)))
      (list resp o)))
   (if tool-calls
       (pcase-let* ((selection (gptel-permit--select-tool-and-arg tool-calls))
-                   (tool-call (car selection))
-                   (arg-key (cdr selection)))
+                   (tool-call (plist-get selection :tool-call))
+                   (tool-match (plist-get selection :tool-match))
+                   (arg-selection (plist-get selection :arg-selection)))
         (if (not tool-call)
             (message "No tool call selected.")
           (let* ((tool-spec (car tool-call))
                  (arg-plist (cadr tool-call))
                  (tool-name (gptel-tool-name tool-spec))
-                 (current-val (plist-get arg-plist arg-key))
-                 (normalized-val (gptel-permit--normalize-arg arg-key current-val tool-name))
+                 (arg-groups (gptel-permit--resolve-arg-groups tool-name))
+                 ;; Determine which concrete arg key to use for example value
+                 (example-arg-key
+                  (if (consp arg-selection)
+                      ;; arg-selection is (:arg-group . GROUP-SYMBOL)
+                      (let ((group (cdr arg-selection)))
+                        (or (car (cl-find-if
+                                  (lambda (kv)
+                                    (and (eq (cdr kv) group)
+                                         (plist-get arg-plist (car kv))))
+                                  arg-groups))
+                            (car (cl-find-if
+                                  (lambda (kv) (eq (cdr kv) group))
+                                  arg-groups))))
+                    arg-selection))
+                 (current-val (plist-get arg-plist example-arg-key))
+                 (normalized-val (gptel-permit--normalize-arg example-arg-key current-val tool-name))
+                 (default-regexp (concat "^" (regexp-quote normalized-val) "$"))
                  (regexp (read-regexp
-                          (format "Regexp to match %s arg %s (current: %s): "
-                                  tool-name arg-key normalized-val)))
+                          (format "Regexp to match %s arg %s: "
+                                  tool-name
+                                  (if (consp arg-selection)
+                                      (format "group `%s'" (cdr arg-selection))
+                                    arg-selection))
+                          default-regexp))
                  (action-str (completing-read "Action when matched: " '("allow" "deny" "ask") nil t nil nil "allow"))
-                 (action (intern action-str)))
-            (push (list :tool tool-name
-                        :conditions (list (cons arg-key regexp))
+                 (action (intern action-str))
+                 ;; Build the rule
+                 (tool-key (if (eq tool-match :tool-group) :tool-group :tool))
+                 (tool-val (if (eq tool-match :tool-group)
+                               (gptel-permit--resolve-tool-group tool-name)
+                             tool-name))
+                 (condition
+                  (if (consp arg-selection)
+                      ;; arg-selection is (:arg-group . GROUP-SYMBOL)
+                      ;; condition form: (:arg-group GROUP-SYMBOL . regexp)
+                      (cons :arg-group (cons (cdr arg-selection) regexp))
+                    (cons arg-selection regexp))))
+            (push (list tool-key tool-val
+                        :conditions (list condition)
                         :action action)
                   gptel-permit-rules)
-            (message "Added rule: tool %s, %s matching %s -> %s"
-                     tool-name arg-key regexp action-str)
+            (message "Added rule: %s %s, %s matching %s -> %s"
+                     (if (eq tool-match :tool-group) "tool-group" "tool")
+                     (if (eq tool-match :tool-group)
+                         (symbol-name tool-val)
+                       tool-val)
+                     (if (consp arg-selection)
+                         (format "arg-group %s" (cdr arg-selection))
+                       arg-selection)
+                     regexp action-str)
             (pcase-let ((`(,denied-calls ,allowed-calls)
                          (cl-loop for tc in tool-calls
                                   if (eq (gptel-permit--rule-action-for-call (car tc) (cadr tc)) 'deny)
