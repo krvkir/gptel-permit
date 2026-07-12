@@ -46,10 +46,7 @@
   (let ((groups (gptel-permit--resolve-arg-groups "Bash")))
     (should (null (alist-get :command groups)))))
 
-(ert-deftest gptel-permit-tool-groups-path-semantics ()
-  "The 'path' arg-group is declared as path-semantic."
-  (should (gptel-permit--arg-group-path-p 'path))
-  (should (not (gptel-permit--arg-group-path-p 'shell))))
+
 
 (ert-deftest gptel-permit-tool-groups-user-extension ()
   "User can add custom tools to the mapping."

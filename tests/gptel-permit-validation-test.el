@@ -29,7 +29,7 @@
 
 (ert-deftest gptel-permit-validation-unknown-tool ()
   "Unknown tool call returns :block."
-  (let ((result (gptel-permit--validate-tool-args
+  (let ((result (gptel-permit--validate-args
                  (list :name "InventedTool" :args '(:x 1)))))
     (should result)
     (should (plist-get result :block))
@@ -37,7 +37,7 @@
 
 (ert-deftest gptel-permit-validation-known-tool-passes ()
   "Known tool call with valid args passes validation."
-  (let ((result (gptel-permit--validate-tool-args
+  (let ((result (gptel-permit--validate-args
                  (list :name "TestRead" :args '(:file_path "foo.txt" :start_line 10)))))
     (should (null result))))
 
@@ -47,7 +47,7 @@
 
 (ert-deftest gptel-permit-validation-missing-required-arg ()
   "Missing required argument returns :block with descriptive error."
-  (let ((result (gptel-permit--validate-tool-args
+  (let ((result (gptel-permit--validate-args
                  (list :name "TestRead" :args '(:start_line 10 :end_line 20)))))
     (should result)
     (should (plist-get result :block))
@@ -56,7 +56,7 @@
 
 (ert-deftest gptel-permit-validation-nil-required-arg-counts-as-missing ()
   "A nil value for a required arg counts as missing."
-  (let ((result (gptel-permit--validate-tool-args
+  (let ((result (gptel-permit--validate-args
                  (list :name "TestBash" :args '(:command nil)))))
     (should result)
     (should (plist-get result :block))
@@ -64,7 +64,7 @@
 
 (ert-deftest gptel-permit-validation-all-required-present ()
   "When all required args are present, no blocking for missing args."
-  (let ((result (gptel-permit--validate-tool-args
+  (let ((result (gptel-permit--validate-args
                  (list :name "TestBash" :args '(:command "ls -la")))))
     (should (null result))))
 
@@ -74,7 +74,7 @@
 
 (ert-deftest gptel-permit-validation-typo-detection ()
   "A typo in an argument name returns :block with fuzzy hint."
-  (let ((result (gptel-permit--validate-tool-args
+  (let ((result (gptel-permit--validate-args
                  (list :name "TestRead" :args '(:file_paht "foo.txt" :start_line 1)))))
     (should result)
     (should (plist-get result :block))
@@ -85,7 +85,7 @@
 
 (ert-deftest gptel-permit-validation-multiple-typos ()
   "Multiple unknown args are all reported."
-  (let ((result (gptel-permit--validate-tool-args
+  (let ((result (gptel-permit--validate-args
                  (list :name "TestRead" :args '(:file_paht "foo.txt" :star_line 1 :end_line 20)))))
     (should result)
     (should (plist-get result :block))
@@ -95,19 +95,19 @@
 
 (ert-deftest gptel-permit-validation-all-args-valid ()
   "All provided arg names matching spec → no block."
-  (let ((result (gptel-permit--validate-tool-args
+  (let ((result (gptel-permit--validate-args
                  (list :name "TestRead" :args '(:file_path "foo.txt" :start_line 1 :end_line 20)))))
     (should (null result))))
 
 (ert-deftest gptel-permit-validation-optional-args-ok ()
   "Optional args are not required."
-  (let ((result (gptel-permit--validate-tool-args
+  (let ((result (gptel-permit--validate-args
                  (list :name "TestRead" :args '(:file_path "foo.txt")))))
     (should (null result))))
 
 (ert-deftest gptel-permit-validation-empty-args-with-required ()
   "Empty args on a tool with required args triggers both missing and no typos."
-  (let ((result (gptel-permit--validate-tool-args
+  (let ((result (gptel-permit--validate-args
                  (list :name "TestRead" :args '()))))
     (should result)
     (should (plist-get result :block))
