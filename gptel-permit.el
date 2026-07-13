@@ -21,6 +21,9 @@
 (require 'gptel)
 (require 'project)
 
+(declare-function gptel-tool-p "gptel-request" (object))
+(declare-function gptel-tool-name "gptel-request" (tool))
+
 (defgroup gptel-permit nil
   "Rule-based tool-call permissions for gptel."
   :group 'gptel
@@ -31,7 +34,7 @@
   :type 'boolean
   :group 'gptel-permit)
 
-(defun gptel-permit-log (format-string &rest args)
+(defun gptel-permit--log (format-string &rest args)
   "Log a message to the `*gptel-permit-log*' buffer if logging is enabled.
 FORMAT-STRING and ARGS are passed to `format'."
   (when gptel-permit-log-enabled
@@ -41,8 +44,14 @@ FORMAT-STRING and ARGS are passed to `format'."
         (save-excursion
           (goto-char (point-max))
           (let ((inhibit-read-only t))
-            (insert (format-time-string "[%Y-%m-%d %H:%M:%S] ") msg "\n"))))
-      (message "gptel-permit: %s" msg))))
+            (insert (format-time-string "[%Y-%m-%d %H:%M:%S] ") msg "\n")))))))
+
+(defun gptel-permit--truncate-arg (arg)
+  "Truncate string representation of ARG to first 30 and last 30 characters if it's longer than 60."
+  (let ((s (format "%s" arg)))
+    (if (> (length s) 60)
+        (concat (substring s 0 30) "..." (substring s -30))
+      s)))
 
 (defcustom gptel-permit-global-rules
   '((:tool-group read
@@ -161,6 +170,16 @@ belonging to that group."
   "Resolve TOOL-NAME to its :arg-groups."
   (plist-get (cdr (assoc tool-name gptel-permit-tool-groups)) :arg-groups))
 
+(defun gptel-permit--normalize-tool-call (tool-call)
+  "Normalize TOOL-CALL from overlay format to plist format."
+  (if (and (listp tool-call)
+           (not (keywordp (car tool-call)))
+           (fboundp 'gptel-tool-p)
+           (gptel-tool-p (car tool-call)))
+      (list :name (gptel-tool-name (car tool-call))
+            :args (cadr tool-call))
+    tool-call))
+
 (defun gptel-permit--enrich-tool-call (tool-call)
   "Enrich TOOL-CALL with :tool-group and :arg-groups."
   (let* ((name (plist-get tool-call :name))
@@ -180,37 +199,51 @@ names, missing required arguments, and unknown argument names."
                  (plist-get tool-call :error)))
     (let* ((name (plist-get tool-call :name))
            (args (plist-get tool-call :args))
-           (tool (ignore-errors
-                   (if (fboundp 'gptel-get-tool)
-                       (gptel-get-tool name)
-                     (alist-get name gptel-tools nil nil #'equal)))))
-      (if (not tool)
-          (list :block (format "Unknown tool: %s" name))
-        (let ((spec-args (gptel-tool-args tool))
-              (missing nil)
-              (unknown nil))
-          (dolist (spec-arg spec-args)
-            (let* ((arg-name (intern (concat ":" (plist-get spec-arg :name))))
-                   (optional (plist-get spec-arg :optional))
-                   (val (plist-get args arg-name)))
-              (when (and (not optional)
-                         (or (not (plist-member args arg-name))
-                             (null val)))
-                (push (plist-get spec-arg :name) missing))))
-          (let ((spec-arg-names (mapcar (lambda (a) (intern (concat ":" (plist-get a :name)))) spec-args)))
+           (trunc-args (cl-loop for (k v) on args by #'cddr
+                                collect k collect (gptel-permit--truncate-arg v))))
+      (gptel-permit--log "Started validation for tool: %s with args: %S" name trunc-args)
+      (let ((tool (ignore-errors
+                    (if (fboundp 'gptel-get-tool)
+                        (gptel-get-tool name)
+                      (alist-get name gptel-tools nil nil #'equal)))))
+        (if (not tool)
+            (progn
+              (gptel-permit--log "Verdict: Blocked (Unknown tool: %s)" name)
+              (list :block (format "Unknown tool: %s" name)))
+          (let* ((spec-args (gptel-tool-args tool))
+                 (spec-arg-names (mapcar (lambda (a) (intern (concat ":" (plist-get a :name)))) spec-args))
+                 (missing nil)
+                 (unknown nil))
             (cl-loop for (k v) on args by #'cddr do
-                     (unless (memq k spec-arg-names)
-                       (push (symbol-name k) unknown))))
-          (let ((msg-parts nil))
-            (when missing
-              (push (format "Missing required argument(s): %s" (mapconcat #'identity missing ", ")) msg-parts))
-            (when unknown
-              (push (format "Unknown argument(s): %s (Did you mean %s?)" 
-                            (mapconcat #'identity unknown ", ")
-                            (mapconcat (lambda (a) (plist-get a :name)) spec-args ", "))
-                    msg-parts))
-            (when msg-parts
-              (list :block (mapconcat #'identity (nreverse msg-parts) "; ")))))))))
+                     (if (memq k spec-arg-names)
+                         (gptel-permit--log "Argument %s provided: ok" k)
+                       (progn
+                         (gptel-permit--log "Argument %s provided: wrong (unknown argument)" k)
+                         (push (symbol-name k) unknown))))
+            (dolist (spec-arg spec-args)
+              (let* ((arg-name (intern (concat ":" (plist-get spec-arg :name))))
+                     (optional (plist-get spec-arg :optional))
+                     (val (plist-get args arg-name)))
+                (when (and (not optional)
+                           (or (not (plist-member args arg-name))
+                               (null val)))
+                  (gptel-permit--log "Argument %s missing (required)" arg-name)
+                  (push (plist-get spec-arg :name) missing))))
+            (let ((msg-parts nil))
+              (when missing
+                (push (format "Missing required argument(s): %s" (mapconcat #'identity missing ", ")) msg-parts))
+              (when unknown
+                (push (format "Unknown argument(s): %s (Did you mean %s?)" 
+                              (mapconcat #'identity unknown ", ")
+                              (mapconcat (lambda (a) (plist-get a :name)) spec-args ", "))
+                      msg-parts))
+              (if msg-parts
+                  (let ((msg (mapconcat #'identity (nreverse msg-parts) "; ")))
+                    (gptel-permit--log "Verdict: Blocked (%s)" msg)
+                    (list :block msg))
+                (progn
+                  (gptel-permit--log "Verdict: Validation passed")
+                  nil)))))))))
 
 (defun gptel-permit--match-rule-p (rule tool-call)
   "Match RULE against enriched TOOL-CALL.
@@ -224,64 +257,42 @@ Returns the rule's :action if matched, otherwise nil."
         (conditions (plist-get rule :conditions))
         (action (plist-get rule :action)))
     (when (and rule-tool rule-tool-group)
-      (gptel-permit-log "Warning: Both :tool and :tool-group present in rule. :tool takes precedence."))
-    (when (or (and rule-tool (equal rule-tool name))
-              (and (not rule-tool) rule-tool-group (equal rule-tool-group tool-group))
-              (and (not rule-tool) (not rule-tool-group)))
-      (let ((match t))
-        (catch 'failed
-          (dolist (cond-pair conditions)
-            (let* ((key (car cond-pair))
-                   (val (cdr cond-pair))
-                   (arg-keys (if (keywordp key)
-                                 (list key)
-                               (cl-loop for (k . g) in arg-groups
-                                        if (eq g key) collect k))))
-              (when (null arg-keys)
-                (setq match nil)
-                (throw 'failed nil))
-              (let ((cond-match nil))
-                (dolist (ak arg-keys)
-                  (let ((arg-val (plist-get args ak)))
-                    (when arg-val
-                      (let* ((is-path (or (eq key 'path) (eq (alist-get ak arg-groups) 'path)))
-                             (expanded (if is-path (expand-file-name arg-val) arg-val)))
-                        (cond
-                         ((stringp val)
-                          (when (string-match-p val (format "%s" expanded))
-                            (setq cond-match t)))
-                         ((eq val :path-traversal)
-                          (when (string-match-p "\\(?:^/\\|\\.\\.\\)" (format "%s" arg-val))
-                            (setq cond-match t)))
-                         ((eq val :inside-project)
-                          (let* ((pr (project-current))
-                                 (bfn (buffer-file-name))
-                                 (root (cond (pr (project-root pr))
-                                             (bfn (file-name-directory bfn))
-                                             (t nil))))
-                            (when (and root (file-in-directory-p (format "%s" expanded) root))
-                              (setq cond-match t))))
-                         ((eq val :outside-project)
-                          (let* ((pr (project-current))
-                                 (bfn (buffer-file-name))
-                                 (root (cond (pr (project-root pr))
-                                             (bfn (file-name-directory bfn))
-                                             (t nil))))
-                            (when (and root (not (file-in-directory-p (format "%s" expanded) root)))
-                              (setq cond-match t))))
-                         ((eq val :inside-protected-dirs)
-                          (when (cl-some (lambda (d)
-                                           (let ((protected (expand-file-name d))
-                                                 (target (format "%s" expanded)))
-                                             (or (file-in-directory-p target protected)
-                                                 (file-in-directory-p protected target))))
-                                         gptel-permit-protected-dirs)
-                            (setq cond-match t)))
-                         (t (gptel-permit-log "Unknown condition predicate: %s" val)))))))
-                (unless cond-match
-                  (setq match nil)
-                  (throw 'failed nil))))))
-        (when match action)))))
+      (gptel-permit--log "Warning: Both :tool and :tool-group present in rule."))
+    (let ((reason (cond ((and rule-tool (equal rule-tool name)) "tool name match")
+                        ((and (not rule-tool) rule-tool-group (equal rule-tool-group tool-group)) "tool group match")
+                        ((and (not rule-tool) (not rule-tool-group)) "universal rule"))))
+      (when reason
+        (gptel-permit--log "Testing rule (reason: %s): %S" reason rule)
+        (let ((match t))
+          (catch 'failed
+            (dolist (cond-pair conditions)
+              (let* ((key (car cond-pair))
+                     (val (cdr cond-pair))
+                     (arg-keys (if (keywordp key) (list key)
+                                 (cl-loop for (k . g) in arg-groups if (eq g key) collect k))))
+                (when (null arg-keys) (setq match nil) (throw 'failed nil))
+                (let ((cond-match nil))
+                  (dolist (ak arg-keys)
+                    (let ((arg-val (plist-get args ak)))
+                      (when arg-val
+                        (let* ((is-path (or (eq key 'path) (eq (alist-get ak arg-groups) 'path)))
+                               (expanded (if is-path (expand-file-name arg-val) arg-val)))
+                          (cond
+                           ((stringp val) (when (string-match-p val (format "%s" expanded)) (setq cond-match t)))
+                           ((eq val :path-traversal) (when (string-match-p "\\(?:^/\\|\\.\\.\\)" (format "%s" arg-val)) (setq cond-match t)))
+                           ((eq val :inside-project)
+                            (let* ((pr (project-current)) (bfn (buffer-file-name)) (root (or (and pr (project-root pr)) (and bfn (file-name-directory bfn)))))
+                              (when (and root (file-in-directory-p (format "%s" expanded) root)) (setq cond-match t))))
+                           ((eq val :outside-project)
+                            (let* ((pr (project-current)) (bfn (buffer-file-name)) (root (or (and pr (project-root pr)) (and bfn (file-name-directory bfn)))))
+                              (when (and root (not (file-in-directory-p (format "%s" expanded) root))) (setq cond-match t))))
+                           ((eq val :inside-protected-dirs)
+                            (when (cl-some (lambda (d) (let ((pd (expand-file-name d)) (tg (format "%s" expanded))) (or (file-in-directory-p tg pd) (file-in-directory-p pd tg)))) gptel-permit-protected-dirs) (setq cond-match t)))
+                           (t (gptel-permit--log "Unknown condition predicate: %s" val)))))))
+                  (unless cond-match (setq match nil) (throw 'failed nil))))))
+          (when match
+            (gptel-permit--log "Rule matched!")
+            action))))))
 
 (defun gptel-permit--rule-action (tool-call)
   "Evaluate rules for TOOL-CALL and return action, or nil."
@@ -304,56 +315,74 @@ Returns a plist with :confirm, :block, or nil (fallback)."
                  (plist-get tool-call :result)
                  (plist-get tool-call :error)))
     (let* ((enriched (gptel-permit--enrich-tool-call tool-call))
-           (action (gptel-permit--rule-action enriched)))
-      (pcase action
-        ('allow (list :confirm nil))
-        ('deny  (list :block "auto-denied"))
-        ('ask   (list :confirm t))
-        (_      nil)))))
+           (name (plist-get enriched :name))
+           (args (plist-get enriched :args))
+           (trunc-args (cl-loop for (k v) on args by #'cddr
+                                collect k collect (gptel-permit--truncate-arg v))))
+      (gptel-permit--log "Started rule checks for tool: %s with args: %S" name trunc-args)
+      (let ((action (gptel-permit--rule-action enriched)))
+        (gptel-permit--log "Verdict: %s" (or action "none (fallback)"))
+        (pcase action
+          ('allow (list :confirm nil))
+          ('deny  (list :block "auto-denied"))
+          ('ask   (list :confirm t))
+          (_      nil))))))
 
 ;;;###autoload
 (defun gptel-permit-add-rule (&optional tool-calls ov)
   "Prompt to create a rule, then apply it to all the TOOL-CALLS in the current pack."
-  (interactive)
+  (interactive (pcase-let ((`(,resp . ,o) (get-char-property-and-overlay
+                                           (point) 'gptel-tool)))
+                 (list resp o)))
   (unless tool-calls
     ;; Fallback for interactive use outside the overlay, though normally called via keymap
     (user-error "No tool-calls provided to create a rule for"))
-  (let* ((tool-call (car tool-calls))
-         (enriched (gptel-permit--enrich-tool-call tool-call))
-         (name (plist-get enriched :name))
-         (args (plist-get enriched :args))
-         (tool-group (plist-get enriched :tool-group))
-         (arg-groups (plist-get enriched :arg-groups))
-         (rule (list))
-         (conditions nil))
-    (if (and tool-group
-             (y-or-n-p (format "Tool '%s' belongs to group '%s'. Target the entire group?" name tool-group)))
-        (setq rule (plist-put rule :tool-group tool-group))
-      (setq rule (plist-put rule :tool name)))
-    (catch 'done
-      (while t
-        (let* ((arg-keys (cl-loop for (k v) on args by #'cddr collect (symbol-name k)))
-               (choices (append arg-keys '("DONE")))
-               (choice (completing-read "Select argument to match (or DONE): " choices)))
-          (if (string= choice "DONE")
-              (throw 'done t)
-            (let* ((arg-kw (intern choice))
-                   (arg-val (plist-get args arg-kw))
-                   (arg-group (alist-get arg-kw arg-groups))
-                   (target arg-kw))
-              (when (and arg-group
-                         (y-or-n-p (format "Argument '%s' belongs to group '%s'. Target the entire group?" choice arg-group)))
-                (setq target arg-group))
-              (let* ((default-re (if arg-val (format "^%s$" (regexp-quote (format "%s" arg-val))) ""))
-                     (re (read-string (format "Regexp for %s: " target) default-re)))
-                (push (cons target re) conditions)))))))
-    (setq rule (plist-put rule :conditions (nreverse conditions)))
-    (let ((action (intern (completing-read "Action: " '("allow" "ask" "deny") nil t))))
-      (setq rule (plist-put rule :action action)))
-    (push rule gptel-permit-rules)
-    (message "Rule added: %S" rule)
-    (when (fboundp 'gptel--accept-tool-calls)
-      (gptel--accept-tool-calls tool-calls ov))))
+  (let* ((normalized-tool-calls (mapcar #'gptel-permit--normalize-tool-call tool-calls)))
+    (gptel-permit--log "Started rule addition. Active tool calls: %S" 
+                       (mapcar (lambda (tc) (plist-get tc :name)) normalized-tool-calls))
+    (let* ((tool-call (car normalized-tool-calls))
+           (enriched (gptel-permit--enrich-tool-call tool-call))
+           (name (plist-get enriched :name))
+           (args (plist-get enriched :args))
+           (tool-group (plist-get enriched :tool-group))
+           (arg-groups (plist-get enriched :arg-groups))
+           (rule (list))
+           (conditions nil))
+      (gptel-permit--log "Using tool call: %s (group: %s). Args found: %S. Arg groups: %S" 
+                         name tool-group
+                         (cl-loop for (k v) on args by #'cddr collect k
+                                  collect (gptel-permit--truncate-arg v)) arg-groups)
+      (if (and tool-group
+               (y-or-n-p (format "Tool '%s' belongs to group '%s'. Target the entire group?"
+                                 name tool-group)))
+          (setq rule (plist-put rule :tool-group tool-group))
+        (setq rule (plist-put rule :tool name)))
+      (catch 'done
+        (while t
+          (let* ((arg-keys (cl-loop for (k v) on args by #'cddr collect (symbol-name k)))
+                 (choices (append arg-keys '("DONE")))
+                 (choice (completing-read "Select argument to match (or DONE): " choices)))
+            (if (string= choice "DONE")
+                (throw 'done t)
+              (let* ((arg-kw (intern choice))
+                     (arg-val (plist-get args arg-kw))
+                     (arg-group (alist-get arg-kw arg-groups))
+                     (target arg-kw))
+                (when (and arg-group
+                           (y-or-n-p (format "Argument '%s' belongs to group '%s'. Target the entire group?" choice arg-group)))
+                  (setq target arg-group))
+                (let* ((default-re (if arg-val (format "^%s$" (regexp-quote (format "%s" arg-val))) ""))
+                       (re (read-string (format "Regexp for %s: " target) default-re)))
+                  (push (cons target re) conditions)
+                  (gptel-permit--log "Added condition: %s matches %S" target re)))))))
+      (setq rule (plist-put rule :conditions (nreverse conditions)))
+      (let ((action (intern (completing-read "Action: " '("allow" "ask" "deny") nil t))))
+        (setq rule (plist-put rule :action action)))
+      (push rule gptel-permit-rules)
+      (gptel-permit--log "Resulting rule: %S" rule)
+      (message "Rule added: %S" rule)
+      (when (fboundp 'gptel--accept-tool-calls)
+        (gptel--accept-tool-calls tool-calls ov)))))
 
 ;;;###autoload
 (define-minor-mode gptel-permit-mode

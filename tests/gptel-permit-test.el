@@ -71,8 +71,21 @@
     (let ((call (list :name "Read" :args '(:file_path "random.txt"))))
       (should (null (gptel-permit--apply-rules call))))))
 
-
-
+(ert-deftest gptel-permit-normalize-tool-call-test ()
+  "Test gptel-permit--normalize-tool-call with various structures."
+  (let* ((tool (gptel--make-tool-internal :name "Edit" :function 'ignore :description "test tool"))
+         ;; Overlay-style tool call: (tool-spec arg-plist process-tool-result)
+         (overlay-tc (list tool '(:path "/tmp/foo" :diff t) 'ignore))
+         ;; Plist-style tool call: (:name name :args args)
+         (plist-tc '(:name "Edit" :args (:path "/tmp/foo" :diff t))))
+    ;; 1. Normalizing overlay-style should return plist-style
+    (should (equal (gptel-permit--normalize-tool-call overlay-tc)
+                   '(:name "Edit" :args (:path "/tmp/foo" :diff t))))
+    ;; 2. Normalizing plist-style should return plist-style unchanged
+    (should (equal (gptel-permit--normalize-tool-call plist-tc)
+                   plist-tc))
+    ;; 3. Normalizing non-list or nil should return it as-is
+    (should (null (gptel-permit--normalize-tool-call nil)))))
 
 (provide 'gptel-permit-test)
 ;;; gptel-permit-test.el ends here
