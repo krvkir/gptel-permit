@@ -19,8 +19,8 @@
   (should (equal (gptel-permit--resolve-tool-group "Edit") 'write))
   (should (equal (gptel-permit--resolve-tool-group "Insert") 'write))
   (should (equal (gptel-permit--resolve-tool-group "Mkdir") 'write))
-  ;; Bash → "shell" group
-  (should (equal (gptel-permit--resolve-tool-group "Bash") 'shell)))
+  ;; Bash → "execute" group
+  (should (equal (gptel-permit--resolve-tool-group "Bash") 'execute)))
 
 (ert-deftest gptel-permit-tool-groups-unknown-tool ()
   "Unknown tool returns nil for tool-group."

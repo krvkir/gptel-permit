@@ -235,7 +235,7 @@ names, missing required arguments, and unknown argument names."
                  (spec-arg-names (mapcar (lambda (a) (intern (concat ":" (plist-get a :name)))) spec-args))
                  (missing nil)
                  (unknown nil))
-            (cl-loop for (k v) on args by #'cddr do
+            (cl-loop for (k _v) on args by #'cddr do
                      (if (memq k spec-arg-names)
                          (gptel-permit--log "Argument %s provided: ok" k)
                        (progn
@@ -294,13 +294,14 @@ Returns the rule's :action if matched, otherwise nil."
                 (when (null arg-keys) (setq match nil) (throw 'failed nil))
                 (let ((cond-match nil))
                   (dolist (ak arg-keys)
-                    (let ((arg-val (plist-get args ak)))
-                      (when arg-val
-                        (let* ((is-path (or (eq key 'path) (eq (alist-get ak arg-groups) 'path)))
-                               (expanded (if is-path (expand-file-name arg-val) arg-val)))
+                    (let* ((arg-val (plist-get args ak))
+                           (is-path (or (eq key 'path) (eq (alist-get ak arg-groups) 'path)))
+                           (effective-val (if (and is-path (null arg-val)) "" arg-val)))
+                      (when effective-val
+                        (let* ((expanded (if is-path (expand-file-name effective-val) effective-val)))
                           (cond
                            ((stringp val) (when (string-match-p val (format "%s" expanded)) (setq cond-match t)))
-                           ((eq val :path-traversal) (when (string-match-p "\\(?:^/\\|\\.\\.\\)" (format "%s" arg-val)) (setq cond-match t)))
+                           ((eq val :path-traversal) (when (string-match-p "\\(?:^/\\|\\.\\.\\)" (format "%s" effective-val)) (setq cond-match t)))
                            ((eq val :inside-project)
                             (let* ((pr (project-current)) (bfn (buffer-file-name)) (root (or (and pr (project-root pr)) (and bfn (file-name-directory bfn)))))
                               (when (and root (file-in-directory-p (format "%s" expanded) root)) (setq cond-match t))))
@@ -351,7 +352,7 @@ Returns a plist with :confirm, :block, or nil (fallback)."
 
 ;;;###autoload
 (defun gptel-permit-add-rule (&optional tool-calls ov)
-  "Prompt to create a rule, then apply it to all the TOOL-CALLS in the current pack."
+  "Prompt to create a rule, then apply it to all the TOOL-CALLS in current pack."
   (interactive (pcase-let ((`(,resp . ,o) (get-char-property-and-overlay
                                            (point) 'gptel-tool)))
                  (list resp o)))
@@ -380,8 +381,23 @@ Returns a plist with :confirm, :block, or nil (fallback)."
         (setq rule (plist-put rule :tool name)))
       (catch 'done
         (while t
-          (let* ((arg-keys (cl-loop for (k v) on args by #'cddr collect (symbol-name k)))
-                 (choices (append arg-keys '("DONE")))
+          (let* ((arg-keys (cl-loop for (k _v) on args by #'cddr collect (symbol-name k)))
+                 (tool (ignore-errors
+                         (if (fboundp 'gptel-get-tool)
+                             (gptel-get-tool name)
+                           (alist-get name gptel-tools nil nil #'equal))))
+                 (spec-args (and tool (gptel-tool-args tool)))
+                 (path-spec-args (and spec-args
+                                      (cl-loop for spec-arg in spec-args
+                                               for arg-str = (plist-get spec-arg :name)
+                                               for arg-kw = (intern (concat ":" arg-str))
+                                               when (eq (alist-get arg-kw arg-groups) 'path)
+                                               collect arg-str)))
+                 (all-possible-args (cl-delete-duplicates
+                                     (append arg-keys
+                                             (mapcar (lambda (s) (concat ":" s)) path-spec-args))
+                                     :test #'string=))
+                 (choices (append all-possible-args '("DONE")))
                  (choice (completing-read "Select argument to match (or DONE): " choices)))
             (if (string= choice "DONE")
                 (throw 'done t)

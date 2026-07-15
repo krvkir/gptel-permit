@@ -145,10 +145,20 @@
     ;; Absolute path outside docs
     (should (null (gptel-permit--match-rule-p rule (gptel-permit--enrich-tool-call (list :name "Read" :args '(:file_path "/home/user/src/main.el"))))))))
 
-(ert-deftest gptel-permit-rule-nil-path-no-match ()
-  "A nil path argument causes the condition to fail."
-  (let ((rule '(:tool "Glob" :conditions ((path . ".*")) :action allow)))
-    (should (null (gptel-permit--match-rule-p rule (gptel-permit--enrich-tool-call (list :name "Glob" :args '(:pattern "*.el" :path nil))))))))
+(ert-deftest gptel-permit-rule-nil-path-treated-as-empty-string ()
+  "A nil path argument is treated as an empty string, resolving to current directory."
+  (let ((rule '(:tool "Glob" :conditions ((path . ".*")) :action allow))
+        (default-directory "/home/user/"))
+    (should (eq (gptel-permit--match-rule-p rule (gptel-permit--enrich-tool-call (list :name "Glob" :args '(:pattern "*.el" :path nil))))
+                'allow))))
+
+(ert-deftest gptel-permit-rule-missing-path-treated-as-empty-string ()
+  "A missing path argument is treated as an empty string, resolving to current directory."
+  (let ((rule '(:tool "Glob" :conditions ((path . ".*")) :action allow))
+        (default-directory "/home/user/"))
+    (should (eq (gptel-permit--match-rule-p rule (gptel-permit--enrich-tool-call (list :name "Glob" :args '(:pattern "*.el"))))
+                'allow))))
+
 
 ;; -------------------------------------------------------------------
 ;; Path traversal as default rule
