@@ -226,7 +226,6 @@ belonging to that group."
              when (gptel-permit--path-arg-p arg-kw arg-groups)
              collect (concat ":" arg-str))))
 
-
 (defun gptel-permit--normalize-tool-call (tool-call)
   "Normalize TOOL-CALL from overlay format to plist format."
   (if (and (listp tool-call)
@@ -424,18 +423,25 @@ Returns a plist with :confirm, :block, or nil (fallback)."
                 (when (and arg-group
                            (y-or-n-p (format "Argument '%s' belongs to group '%s'. Target the entire group?" choice arg-group)))
                   (setq target arg-group))
-                (let* ((default-re (if arg-val (format "^%s$" (regexp-quote (format "%s" arg-val))) ""))
+                (let* ((is-path (or (eq target 'path) (gptel-permit--path-arg-p arg-kw arg-groups)))
+                       (effective-val (if is-path
+                                          (expand-file-name (or arg-val ""))
+                                        arg-val))
+                       (default-re (if effective-val (format "^%s$" (regexp-quote (format "%s" effective-val))) ""))
                        (re (read-string (format "Regexp for %s: " target) default-re)))
                   (push (cons target re) conditions)
                   (gptel-permit--log "Added condition: %s matches %S" target re)))))))
       (setq rule (plist-put rule :conditions (nreverse conditions)))
       (let ((action (intern (completing-read "Action: " '("allow" "ask" "deny") nil t))))
-        (setq rule (plist-put rule :action action)))
-      (push rule gptel-permit-rules)
-      (gptel-permit--log "Resulting rule: %S" rule)
-      (message "Rule added: %S" rule)
-      (when (fboundp 'gptel--accept-tool-calls)
-        (gptel--accept-tool-calls tool-calls ov)))))
+        (setq rule (plist-put rule :action action))
+        (push rule gptel-permit-rules)
+        (gptel-permit--log "Resulting rule: %S" rule)
+        (message "Rule added: %S" rule)
+        (if (eq action 'deny)
+            (when (fboundp 'gptel--reject-tool-calls)
+              (gptel--reject-tool-calls tool-calls ov))
+          (when (fboundp 'gptel--accept-tool-calls)
+            (gptel--accept-tool-calls tool-calls ov)))))))
 
 ;;;###autoload
 (define-minor-mode gptel-permit-mode
