@@ -1,5 +1,7 @@
 #+title: gptel-permit: Rule-Based Tool-Call Permissions for gptel
 
+[[file:img/demo.webm][A demo]]
+
 This package bridges the gap between granting an LLM full, unchecked freedom (losing all control) and being constantly interrupted to confirm or reject every minor tool call.
 
 It adds a rule-based permission system (vaguely inspired by =iptables=) for [[https://github.com/karthink/gptel][gptel]] tool calls. You can define rules to automatically allow, deny, or require confirmation for tool calls based on the tool's name, group, or argument values (using regexps or predicates).
