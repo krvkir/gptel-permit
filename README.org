@@ -1,6 +1,6 @@
 #+title: gptel-permit: Rule-Based Tool-Call Permissions for gptel
 
-[[file:img/demo.webm]]
+[[./img/demo.webm]]
 
 This package bridges the gap between granting an LLM full, unchecked freedom (losing all control) and being constantly interrupted to confirm or reject every minor tool call.
 
