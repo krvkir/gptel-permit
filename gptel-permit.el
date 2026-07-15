@@ -145,10 +145,12 @@ Used by the `:inside-protected-dirs' predicate in permission rules."
     ("Edit" :tool-group write :arg-groups ((:path . path)))
     ("Insert" :tool-group write :arg-groups ((:path . path)))
     ("Mkdir" :tool-group write :arg-groups ((:parent . path) (:name . path)))
-    ("Bash" :tool-group shell)
+    ("Bash" :tool-group execute)
+    ("Eval" :tool-group execute)
     ("WebSearch" :tool-group search)
     ("WebFetch" :tool-group search)
     ("YouTube" :tool-group search)
+    ("Skill" :tool-group search)
     ("symbol_exists" :tool-group search)
     ("load_paths" :tool-group search)
     ("features" :tool-group search)
@@ -180,9 +182,6 @@ belonging to that group."
                                              (:arg-groups (alist :key-type symbol
                                                                  :value-type symbol)))))
   :group 'gptel-permit)
-
-(defvar gptel-permit-path-arg-groups nil
-  "Obsolete variable. Do not use.")
 
 (defun gptel-permit--resolve-tool-group (tool-name)
   "Resolve TOOL-NAME to its :tool-group."
