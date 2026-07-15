@@ -63,11 +63,13 @@ FORMAT-STRING and ARGS are passed to `format'."
     (:tool-group write
                  :conditions ((path . :path-traversal))
                  :action ask)
+    (:tool-group search :action allow)
     (:conditions ((path . :inside-protected-dirs))
                  :action ask)
     (:tool "Bash"
            :conditions ((:command . ".* rm .*"))
-           :action ask))
+           :action ask)
+    (:action ask))
   "Global permission rules for gptel tools.
 
 Each rule is a plist specifying matching conditions for a tool
@@ -136,14 +138,34 @@ Used by the `:inside-protected-dirs' predicate in permission rules."
   :group 'gptel-permit)
 
 (defcustom gptel-permit-tool-groups
-  '(("Read"   :tool-group read   :arg-groups ((:file_path . path)))
-    ("Glob"   :tool-group read   :arg-groups ((:path . path)))
-    ("Grep"   :tool-group read   :arg-groups ((:path . path)))
-    ("Write"  :tool-group write  :arg-groups ((:path . path) (:filename . path)))
-    ("Edit"   :tool-group write  :arg-groups ((:path . path)))
-    ("Insert" :tool-group write  :arg-groups ((:path . path)))
-    ("Mkdir"  :tool-group write  :arg-groups ((:parent . path) (:name . path)))
-    ("Bash"   :tool-group shell))
+  '(("Read" :tool-group read :arg-groups ((:file_path . path)))
+    ("Glob" :tool-group read :arg-groups ((:path . path)))
+    ("Grep" :tool-group read :arg-groups ((:path . path)))
+    ("Write" :tool-group write :arg-groups ((:path . path) (:filename . path)))
+    ("Edit" :tool-group write :arg-groups ((:path . path)))
+    ("Insert" :tool-group write :arg-groups ((:path . path)))
+    ("Mkdir" :tool-group write :arg-groups ((:parent . path) (:name . path)))
+    ("Bash" :tool-group shell)
+    ("WebSearch" :tool-group search)
+    ("WebFetch" :tool-group search)
+    ("YouTube" :tool-group search)
+    ("symbol_exists" :tool-group search)
+    ("load_paths" :tool-group search)
+    ("features" :tool-group search)
+    ("manual_names" :tool-group search)
+    ("manual_nodes" :tool-group search)
+    ("manual_node_contents" :tool-group search)
+    ("library_source" :tool-group search)
+    ("symbol_manual_section" :tool-group search)
+    ("function_source" :tool-group search)
+    ("variable_source" :tool-group search)
+    ("variable_value" :tool-group read)
+    ("function_documentation" :tool-group search)
+    ("variable_documentation" :tool-group search)
+    ("variable_completions" :tool-group search)
+    ("function_completions" :tool-group search)
+    ("command_completions" :tool-group search)
+    ("variable_prefix" :tool-group search))
   "Mapping of tool names to tool-groups and argument-groups.
 
 Each entry is a list: (TOOL-NAME :tool-group GROUP :arg-groups ((ARG . GROUP) ...)).
