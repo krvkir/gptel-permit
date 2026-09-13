@@ -20,4 +20,6 @@ test: clean
 		-l gptel-permit-rule-engine-test.el \
 		-l gptel-permit-validation-test.el \
 		-l gptel-permit-hook-integration-test.el \
+		-l gptel-permit-callable-conditions-test.el \
+		-l gptel-permit-judge-test.el \
 		-f ert-run-tests-batch-and-exit

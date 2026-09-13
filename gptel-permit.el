@@ -96,7 +96,10 @@ Each condition KEY can be:
 Each condition PATTERN can be:
   - A regexp string tested against the normalized argument value.
   - A predicate keyword (:inside-project, :outside-project,
-    :inside-protected-dirs, :path-traversal).
+    :inside-protected-dirs, :path-traversal) — looked up in
+    `gptel-permit--condition-predicates'.
+  - A function called as (FUNC VALUE TOOL-CALL); non-nil return
+    means the condition matches.
 
 Default rules:
   - Auto-allow read tools accessing paths inside the project.
@@ -114,13 +117,14 @@ Customize this variable or override it in your init file."
                      (:conditions (repeat
                                    (cons
                                     (choice (symbol :tag "Argument group")
-                                            (symbol :tag "Argument name"))
+                                           (symbol :tag "Argument name"))
                                     (choice :tag "Rule condition"
                                             (string :tag "Regexp")
                                             (const :inside-project)
                                             (const :outside-project)
                                             (const :inside-protected-dirs)
-                                            (const :path-traversal)))))
+                                            (const :path-traversal)
+                                            (function :tag "Custom checker")))))
                      (:action
                       (choice (const :tag "Allow (auto-approve)" allow)
                               (const :tag "Deny (auto-block)" deny)
@@ -297,6 +301,63 @@ names, missing required arguments, and unknown argument names."
                   (gptel-permit--log "Verdict: Validation passed")
                   nil)))))))))
 
+(defun gptel-permit--inside-project-p (expanded _raw _tool-call)
+  "Return non-nil if expanded path EXPANDED is inside the project root."
+  (let ((root (gptel-permit--project-root)))
+    (and root (file-in-directory-p (format "%s" expanded) root))))
+
+(defun gptel-permit--outside-project-p (expanded _raw _tool-call)
+  "Return non-nil if expanded path EXPANDED is outside the project root."
+  (let ((root (gptel-permit--project-root)))
+    (and root (not (file-in-directory-p (format "%s" expanded) root)))))
+
+(defun gptel-permit--inside-protected-dirs-p (expanded _raw _tool-call)
+  "Return non-nil if expanded path EXPANDED is inside a protected directory."
+  (cl-some (lambda (d)
+             (let ((pd (expand-file-name d))
+                   (tg (format "%s" expanded)))
+               (or (file-in-directory-p tg pd)
+                   (file-in-directory-p pd tg))))
+           gptel-permit-protected-dirs))
+
+(defun gptel-permit--path-traversal-p (_expanded raw _tool-call)
+  "Return non-nil if RAW (unexpanded) value contains `..' or is absolute."
+  (string-match-p "\\(?:^/\\|\\.\\.\\)" raw))
+
+(defvar gptel-permit--condition-predicates
+  '((:inside-project        . gptel-permit--inside-project-p)
+    (:outside-project       . gptel-permit--outside-project-p)
+    (:inside-protected-dirs . gptel-permit--inside-protected-dirs-p)
+    (:path-traversal        . gptel-permit--path-traversal-p))
+  "Alist mapping condition predicate keywords to functions.
+Each function is called as (FUNC EXPANDED RAW TOOL-CALL) and returns
+non-nil if the condition matches.  EXPANDED is the expand-file-name'd
+value for path arguments; RAW is the original value before expansion.
+Users may extend this alist with custom keywords.")
+
+(defun gptel-permit--dispatch-condition (key val arg-val tool-call arg-groups)
+  "Evaluate a single condition (KEY . VAL) against ARG-VAL from TOOL-CALL.
+KEY is the condition target keyword (argument name or arg-group symbol).
+VAL is the condition value: a string (regexp), a keyword (lookup in
+`gptel-permit--condition-predicates'), or a function.
+ARG-GROUPS is the tool's arg-group alist.
+Returns non-nil if the condition matches.  A nil path argument is coerced
+to \"\" and expanded against `default-directory'; a nil non-path argument
+fails the condition."
+  (let* ((is-path (or (eq key 'path)
+                      (gptel-permit--path-arg-p key arg-groups)))
+         (effective (if (and is-path (null arg-val)) "" arg-val)))
+    (and effective
+         (let ((expanded (if is-path (expand-file-name effective) effective)))
+           (cond
+            ((stringp val) (string-match-p val (format "%s" expanded)))
+            ((keywordp val)
+             (let ((fn (cdr (assoc val gptel-permit--condition-predicates))))
+               (if fn (funcall fn (format "%s" expanded) (format "%s" effective) tool-call)
+                 (progn (gptel-permit--log "Unknown condition predicate: %s" val) nil))))
+            ((functionp val) (funcall val (format "%s" expanded) tool-call))
+            (t (gptel-permit--log "Unknown condition type: %S" val) nil))))))
+
 (defun gptel-permit--match-rule-p (rule tool-call)
   "Match RULE against enriched TOOL-CALL.
 Returns the rule's :action if matched, otherwise nil."
@@ -324,23 +385,8 @@ Returns the rule's :action if matched, otherwise nil."
                           (and arg-keys
                                (cl-some
                                 (lambda (ak)
-                                  (let* ((arg-val (plist-get args ak))
-                                         (is-path (or (eq key 'path) (gptel-permit--path-arg-p ak arg-groups)))
-                                         (effective-val (if (and is-path (null arg-val)) "" arg-val)))
-                                    (and effective-val
-                                         (let ((expanded (if is-path (expand-file-name effective-val) effective-val)))
-                                           (cond
-                                            ((stringp val) (string-match-p val (format "%s" expanded)))
-                                            ((eq val :path-traversal) (string-match-p "\\(?:^/\\|\\.\\.\\)" (format "%s" effective-val)))
-                                            ((eq val :inside-project)
-                                             (let ((root (gptel-permit--project-root)))
-                                               (and root (file-in-directory-p (format "%s" expanded) root))))
-                                            ((eq val :outside-project)
-                                             (let ((root (gptel-permit--project-root)))
-                                               (and root (not (file-in-directory-p (format "%s" expanded) root)))))
-                                            ((eq val :inside-protected-dirs)
-                                             (cl-some (lambda (d) (let ((pd (expand-file-name d)) (tg (format "%s" expanded))) (or (file-in-directory-p tg pd) (file-in-directory-p pd tg)))) gptel-permit-protected-dirs))
-                                            (t (gptel-permit--log "Unknown condition predicate: %s" val) nil))))))
+                                  (let ((arg-val (plist-get args ak)))
+                                    (gptel-permit--dispatch-condition key val arg-val tool-call arg-groups)))
                                 arg-keys))))
                       conditions)))
           (when match
@@ -362,21 +408,26 @@ Returns the rule's :action if matched, otherwise nil."
 (defun gptel-permit--apply-rules (tool-call)
   "Enforce permission rules for TOOL-CALL.
 Session-local rules are checked first, then global rules.
-Returns a plist with :confirm, :block, or nil (fallback)."
-  (unless (gptel-permit--processed-p tool-call)
-    (let* ((enriched (gptel-permit--enrich-tool-call tool-call))
-           (name (plist-get enriched :name))
-           (args (plist-get enriched :args))
-           (trunc-args (cl-loop for (k v) on args by #'cddr
-                                collect k collect (gptel-permit--truncate-arg v))))
-      (gptel-permit--log "Started rule checks for tool: %s with args: %S" name trunc-args)
-      (let ((action (gptel-permit--rule-action enriched)))
-        (gptel-permit--log "Verdict: %s" (or action "none (fallback)"))
-        (pcase action
-          ('allow (list :confirm nil))
-          ('deny  (list :block "auto-denied"))
-          ('ask   (list :confirm t))
-          (_      nil))))))
+Returns a plist with :confirm, :block, or nil (fallback).
+On unexpected error, fail closed with `(:confirm t)'."
+  (condition-case err
+      (unless (gptel-permit--processed-p tool-call)
+        (let* ((enriched (gptel-permit--enrich-tool-call tool-call))
+               (name (plist-get enriched :name))
+               (args (plist-get enriched :args))
+               (trunc-args (cl-loop for (k v) on args by #'cddr
+                                    collect k collect (gptel-permit--truncate-arg v))))
+          (gptel-permit--log "Started rule checks for tool: %s with args: %S" name trunc-args)
+          (let ((action (gptel-permit--rule-action enriched)))
+            (gptel-permit--log "Verdict: %s" (or action "none (fallback)"))
+            (pcase action
+              ('allow (list :confirm nil))
+              ('deny  (list :block "auto-denied"))
+              ('ask   (list :confirm t))
+              (_      nil)))))
+    (error
+     (gptel-permit--log "Error in --apply-rules: %S — failing closed" err)
+     (list :confirm t))))
 
 ;;;###autoload
 (defun gptel-permit-add-rule (&optional tool-calls ov)
