@@ -54,7 +54,9 @@ FORMAT-STRING and ARGS are passed to `format'."
       s)))
 
 (defcustom gptel-permit-global-rules
-  '((:tool-group read
+  '((:conditions ((path . :inside-protected-dirs))
+                 :action ask)
+    (:tool-group read
                  :conditions ((path . :inside-project))
                  :action allow)
     (:tool-group write
@@ -64,8 +66,7 @@ FORMAT-STRING and ARGS are passed to `format'."
                  :conditions ((path . :path-traversal))
                  :action ask)
     (:tool-group search :action allow)
-    (:conditions ((path . :inside-protected-dirs))
-                 :action ask)
+    (:tool-group inform :action allow)
     (:tool "Bash"
            :conditions ((:command . ".* rm .*"))
            :action ask)
@@ -150,6 +151,7 @@ Used by the `:inside-protected-dirs' predicate in permission rules."
     ("WebSearch" :tool-group search)
     ("WebFetch" :tool-group search)
     ("YouTube" :tool-group search)
+    ("TodoWrite" :tool-group inform)
     ("Skill" :tool-group search)
     ("symbol_exists" :tool-group search)
     ("load_paths" :tool-group search)
