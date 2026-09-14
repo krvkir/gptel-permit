@@ -33,7 +33,7 @@ Both hook functions SHALL receive a plist with keys `:name`, `:args`, `:buffer`,
 - THEN each hook function SHALL receive a plist containing `:name "Read"`, `:args (:file_path "foo.txt")`, and at minimum `:buffer`, `:backend`, `:model`.
 
 ### Requirement: Return Value Protocol
-Hook functions SHALL return nil or a plist with keys from the set `:confirm`, `:block`, `:stop`, `:result`, `:args`, `:name`, as defined by gptel's `gptel-pre-tool-call-functions` documentation.
+Hook functions SHALL return nil or a plist with keys from the set `:confirm`, `:block`, `:stop`, `:result`, `:args`, `:name`, as defined by gptel's `gptel-pre-tool-call-functions` documentation. A rule action returning `(:confirm nil :args NEWARGS)` SHALL cause gptel to merge NEWARGS into the executing tool-call object, the LLM-visible message history, and the confirmation UI display.
 
 #### Scenario: Validation returns :block for unknown tool
 - GIVEN a tool call names an unknown tool
@@ -53,6 +53,12 @@ Hook functions SHALL return nil or a plist with keys from the set `:confirm`, `:
 - WHEN the security hook returns `(:confirm t)`
 - THEN the gptel FSM SHALL store `:confirm t` on the tool-call
 - AND the user SHALL be prompted regardless of the tool's `:confirm` slot.
+
+#### Scenario: Security hook returns :args rewrite (sandbox)
+- GIVEN a rule matches with action `sandbox`
+- WHEN the security hook returns `(:confirm nil :args (:command "bwrap … make test"))`
+- THEN the tool SHALL execute with the wrapped command
+- AND the rewritten args SHALL be visible in the LLM history and confirm UI.
 
 #### Scenario: Security hook returns nil (defer to tool's :confirm)
 - GIVEN no rule matches

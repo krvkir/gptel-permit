@@ -2,7 +2,9 @@
 This project provides rule-based auto-approval of tool calls for gptel's agentic LLM usage. Rules match tool calls by name and argument regexps, then auto-allow, auto-deny, or force-confirm.
 
 * Basic Project Structure
-- =gptel-permit.el= :: The single source file. Defines the permission rule engine, an interactive rule-creation command, the pre-tool-call hook, and all customizable options.
+- =gptel-permit.el= :: The rule engine core. Defines permission rules, condition predicates, the pre-tool-call security hook, and the global custom options.
+- =gptel-permit-sandbox.el= :: The `sandbox` rule action: bubblewrap / srt command wrappers, protected-path detection, the pre-tool args-rewrite verdict, and the boundary-failure retry counter.
+- =gptel-permit-analytics.el= :: The optional `analytics` module: an append-only local JSONL decision log, audit sampling that up-ranks automation-allow verdicts to manual confirms, decision-capture advice on gptel's three interactive tool-call commands, and pure statistics/report functions. Inert until `gptel-permit-register-analytics-hooks` is called.
 - =tests/gptel-permit-test.el= :: ERT test suite covering argument normalization, rule matching, security hook behavior, and logging.
 - =README.org= :: User-facing documentation (installation, configuration, usage).
 - =Makefile= :: Batch test runner.
@@ -10,7 +12,7 @@ This project provides rule-based auto-approval of tool calls for gptel's agentic
 * Development Approach
 
 Agents SHALL keep changes small and testable:
-1. *Understand the hook protocol*: =gptel-permit-pre-tool-security-hook= receives a plist of ~(:name :args :buffer :backend :model)~ and returns ~(:confirm nil)~ (auto-accept), ~(:confirm t)~ (force prompt), ~(:block "<reason>")~ (reject), or ~nil~ (defer).
+1. *Understand the hook protocol*: =gptel-permit--apply-rules= receives a plist of ~(:name :args :buffer :backend :model)~ and returns ~(:confirm nil)~ (auto-accept), ~(:confirm t)~ (force prompt), ~(:block "<reason>")~ (reject), ~(:confirm nil :args (:command …))~ (args rewrite; the sandbox verdict), or ~nil~ (defer).
 2. *Match rules predictably*: Session-local rules (=gptel-permit-rules=) always take precedence over global rules (=gptel-permit-global-rules=). All conditions in a rule must match for the action to fire.
 3. *Never miss a hard block*: Path traversal checks in =Write= and =Mkdir= fire before any rule matching and cannot be overridden by rules.
 4. *Log when debugging*: Rule matching is silent by default. Set =gptel-permit-log-enabled= to =t= to write diagnostics into =*gptel-permit-log*=.
@@ -24,6 +26,6 @@ Keep elisp functions under 60 lines. The entire package is one file — resist t
 
 * Integration Surface
 Every change must respect these integration points:
-- ~gptel-pre-tool-call-functions~ (hook) :: =gptel-permit= registers =gptel-permit-pre-tool-security-hook= here at load time. The hook is called by gptel's internal =gptel--handle-pre-tool=. Do not remove or rename this hook; if the signature changes, update tests.
-- ~gptel-tool-call-actions-map~ (keymap) :: =C-c C-b= is bound to =gptel-permit-confirm-or-add-rule=. This keymap is applied to tool-call overlays by gptel. Do not bind other keys here without good reason.
-- ~gptel--accept-tool-calls~ (private function) :: Called by =gptel-permit-confirm-or-add-rule= to execute approved tool calls. This is gptel internal API — fragile but necessary. If gptel upstream changes it, =gptel-permit= must follow.
+- ~gptel-pre-tool-call-functions~ (hook) :: =gptel-permit= registers =gptel-permit--validate-args= and =gptel-permit--apply-rules= here when the mode is enabled. The hook is called by gptel's internal =gptel--handle-pre-tool=. Do not remove or rename this hook; if the signature changes, update tests.
+- ~gptel-tool-call-actions-map~ (keymap) :: =C-c C-b= is bound to =gptel-permit-add-rule=. This keymap is applied to tool-call overlays by gptel. Do not bind other keys here without good reason.
+- ~gptel--accept-tool-calls~ (private function) :: Called by =gptel-permit-add-rule= to execute approved tool calls. This is gptel internal API — fragile but necessary. If gptel upstream changes it, =gptel-permit= must follow.

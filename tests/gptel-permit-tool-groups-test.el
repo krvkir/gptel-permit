@@ -40,11 +40,15 @@
     (should (equal (alist-get :parent groups) 'path))))
 
 (ert-deftest gptel-permit-tool-groups-arg-no-group ()
-  "Argument without a group mapping returns nil."
+  "Argument without a group mapping returns nil; code args map to code."
   (let ((groups (gptel-permit--resolve-arg-groups "Read")))
     (should (null (alist-get :start_line groups))))
+  ;; :command and :expression belong to the `code' arg-group (matched raw,
+  ;; no path expansion).
   (let ((groups (gptel-permit--resolve-arg-groups "Bash")))
-    (should (null (alist-get :command groups)))))
+    (should (equal (alist-get :command groups) 'code)))
+  (let ((groups (gptel-permit--resolve-arg-groups "Eval")))
+    (should (equal (alist-get :expression groups) 'code))))
 
 
 

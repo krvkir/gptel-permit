@@ -22,4 +22,6 @@ test: clean
 		-l gptel-permit-hook-integration-test.el \
 		-l gptel-permit-callable-conditions-test.el \
 		-l gptel-permit-judge-test.el \
+		-l gptel-permit-sandbox-test.el \
+		-l gptel-permit-analytics-test.el \
 		-f ert-run-tests-batch-and-exit

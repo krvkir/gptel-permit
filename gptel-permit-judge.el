@@ -67,6 +67,12 @@ last N entries from the tool call's buffer are included, each truncated."
   "Rationale from the most recent judge verdict in this buffer.
 Set by `gptel-permit-judge-safe-p'; intended for audit/analytics.")
 
+(defvar-local gptel-permit--last-judge-verdict nil
+  "Verdict symbol (`safe' or `unsafe') from the most recent judge run
+in this buffer.  Set by `gptel-permit-judge-safe-p'; intended for
+audit/analytics.  Reset per tool call by `gptel-permit--reset-judge-state'.")
+
+
 (defconst gptel-permit--judge-preamble
   "You are a security classifier for tool calls made by an AI coding agent.
 Decide whether the TOOL CALL below is obviously safe to run unattended.
@@ -112,7 +118,9 @@ tool call's :buffer (a buffer name string); each message is truncated."
                (format "TOOL CALL:\nTool: %s\nKey: %s\nValue:\n%s"
                        (plist-get tool-call :name)
                        (plist-get tool-call :checked-arg)
-                       (gptel-permit--truncate-arg value))))
+                       ;; (gptel-permit--truncate-arg value)
+                       value
+                       )))
    "\n\n"))
 
 (defun gptel-permit--judge-request-sync (prompt)
@@ -162,8 +170,11 @@ This is a deny-only condition: it never blocks, and every failure path
 (unconfigured backend, request error, timeout, C-g, unparseable output,
 UNSAFE verdict) returns nil so the enclosing rule does not match and
 evaluation falls through to later rules.  On any evaluated verdict the
-judge's rationale is stored in `gptel-permit--last-judge-rationale'."
-  (setq gptel-permit--last-judge-rationale nil)
+judge's verdict symbol and rationale are stored in
+`gptel-permit--last-judge-verdict' and `gptel-permit--last-judge-rationale'
+for audit/analytics."
+  (setq gptel-permit--last-judge-rationale nil
+        gptel-permit--last-judge-verdict nil)
   (if (not gptel-permit-judge-backend)
       (progn
         (gptel-permit--log "Judge: disabled (gptel-permit-judge-backend is nil)")
@@ -174,7 +185,8 @@ judge's rationale is stored in `gptel-permit--last-judge-rationale'."
            (parsed (gptel-permit--judge-parse-verdict response))
            (verdict (car parsed))
            (rationale (or (cdr parsed) "")))
-      (setq gptel-permit--last-judge-rationale rationale)
+      (setq gptel-permit--last-judge-rationale rationale
+            gptel-permit--last-judge-verdict verdict)
       (gptel-permit--log "Judge verdict: %s rationale: %s"
                          (or verdict "FAIL") gptel-permit--last-judge-rationale)
       (message nil)

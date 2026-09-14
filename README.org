@@ -164,3 +164,235 @@ The rule is instantly added to your active session (=gptel-permit-rules=) and ap
 - =gptel-permit-tool-groups=: Map tool names to tool-groups and argument-groups.
 - =gptel-permit-protected-dirs=: Directories matching the ~:inside-protected-dirs~ predicate (default: ~("~/.ssh/" "~/.gnupg/")~).
 - =gptel-permit-log-enabled=: Set to ~t~ to print verbose matching diagnostics to the =*gptel-permit-log*= buffer.
+
+* Sandboxing Bash Commands
+:PROPERTIES:
+:ID:       7a2c1d84-0f6e-4a1b-9d3b-5e8f10a2b3c4
+:END:
+
+The ~sandbox~ rule action runs execute-group tool calls inside an OS-level
+boundary instead of prompting you for every command. When a rule with
+~:action sandbox~ matches, =gptel-permit= rewrites the tool call's =:command=
+through a sandbox wrapper and returns ~(:confirm nil :args …)~ — gptel's
+officially supported args-rewrite return. The wrapped command is visible in
+the LLM message history and in the confirm UI. Rules, the judge, and
+validation always evaluate the /original/ command; the wrapping happens last.
+
+This is the only mechanism in this package that is an actual security
+boundary: the model can operate unattended, and anything outside the
+writable set fails with a deterministic OS error that is fed back to the
+model. Commands needing boundary access (e.g. ~ssh~) should match an ~ask~
+rule placed above the sandbox rule and run unsandboxed after your explicit
+approval.
+
+*DISCLAIMER:* the sandbox is a best-effort boundary, not a sandbox escape
+guarantee. Read the "Known Limitations" below before running an agent
+unattended.
+
+** Built-in bubblewrap backend (default)
+
+Requires only =bubblewrap= (=bwrap=) on Linux. The wrapper is:
+
+#+begin_example
+bwrap --die-with-parent --new-session --clearenv --setenv V v ...
+      --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp [--unshare-net]
+      --bind <writable-dir> <writable-dir> ...
+      --ro-bind <protected-path> <protected-path> ...
+      -- bash -c 'ORIGINAL COMMAND'
+#+end_example
+
+- The root is bound read-only, so reads match what in-process tools
+  (=Read=, =Grep=) see; only writes outside writable dirs and network differ.
+- Writable overlays come from =gptel-permit-sandbox-writable-dirs=
+  (default: the project root).
+- The environment is scrubbed (=--clearenv=) and rebuilt from
+  =gptel-permit-sandbox-env-keep= (default: PATH, HOME, LANG, LC_ALL, TERM,
+  TMPDIR).
+- Network is off by default; set =gptel-permit-sandbox-network= to ~t~ to
+  leave it on (binary on/off — there is no domain allowlist in the builtin
+  backend; that needs the srt backend or a proxy).
+- Mandatory protections regardless of rules: =<project>/.git= (hooks and
+  config), =~/.ssh=, =~/.gnupg=, existing shell rc files
+  (=~/.bashrc=, =~/.bash_profile=, =~/.profile=, =~/.zshrc=) and every entry of
+  =gptel-permit-protected-dirs= are read-only bound when they exist.
+- =gptel-permit-sandbox-extra-args= is an escape hatch for extra bwrap
+  flags.
+- Fail closed: if the sandbox binary is not on =exec-path=, the action
+  returns ~(:confirm t)~ (manual confirmation) instead of silently running
+  anything.
+- A boundary-failure retry counter (per gptel buffer) forces manual
+  confirmation after =gptel-permit-sandbox-retry-limit= (default 3)
+  consecutive sandboxed-command failures.
+
+** Setup
+
+#+begin_src elisp
+(use-package gptel-permit
+  :vc (:url "https://github.com/krvkir/gptel-permit" :rev :newest)
+  :config
+  (gptel-permit-mode 1))
+#+end_src
+
+=gptel-permit-sandbox.el= is part of the package and is loaded on demand;
+you do not need to require it explicitly (the =sandbox= action fails closed
+if it is missing). Enablement is opt-in via a rule:
+
+#+begin_src elisp
+;; Auto-run anything inside the sandbox:
+(add-to-list 'gptel-permit-global-rules
+             '(:tool-group execute :action sandbox))
+#+end_src
+
+Recommended order for global rules (first match wins):
+
+1. Deny/ask rules for text you never want to run (e.g. =.* rm .*=).
+2. An ask rule for boundary-crossing commands (see below).
+3. ~(:tool-group execute :action sandbox)~.
+
+Note: =Eval= calls match a blanket ~(:tool-group execute :action sandbox)~
+rule but have no =:command= argument, so they fail closed to a manual
+confirmation. The sandbox covers =Bash=-style subprocesses only; =Write= and
+=Edit= happen inside Emacs and are outside this boundary.
+
+** Escape hatch: ask rules above the sandbox rule
+
+Commands that legitimately need to cross the boundary (network, system
+dirs) should be confirmed by a human:
+
+#+begin_src elisp
+(:tool "Bash" :conditions ((:command . "^ssh ")) :action ask)
+(:tool-group execute :action sandbox)
+#+end_src
+
+The =ask= rule matches first (rules are evaluated in order, on the original
+command), so ~ssh ...~ runs unsandboxed only after your approval.
+
+** Judge-gated sandbox
+
+Combine the LLM judge condition with the sandbox action: judged SAFE calls
+are auto-run inside the sandbox; everything else falls through to the
+next rule (normally ask):
+
+#+begin_src elisp
+(use-package gptel-permit-judge
+  :after gptel-permit)
+
+(:tool-group execute
+ :conditions ((:command . gptel-permit-judge-safe-p))
+ :action sandbox)
+#+end_src
+
+** srt backend (opt-in)
+
+Set =gptel-permit-sandbox-backend= to ='srt= to run the Anthropic
+sandbox-runtime CLI instead. gptel-permit maps its defcustoms to srt's
+settings JSON (=filesystem.allowWrite=, =filesystem.denyRead=/
+=filesystem.denyWrite=, =network.allowedDomains=) into
+=/tmp/gptel-permit-srt-settings.json= and wraps commands as
+=srt --settings FILE bash -c '…'=.
+
+Note: on Linux, srt still requires node, socat and ripgrep for its network
+proxy layer (the unofficial PyPI =sandbox-runtime= port has the same
+requirements), so it is not a lighter path than the builtin backend. The
+srt backend ships documented-but-untested.
+
+** Known limitations
+
+- Linux only in the builtin backend: bwrap does not exist on mac/windows
+  (the srt backend adds macOS Seatbelt support).
+- Mandatory read-only binds cover only paths that exist at wrap time
+  (bubblewrap limitation); a shell rc file created later is not protected.
+- No syscall filtering (no seccomp), no per-domain network filtering in the
+  builtin backend (network is binary on/off).
+- Sandbox covers :command-bearing (Bash-style) tools only. =Write=,
+  =Edit=, =Insert=, =Mkdir= and =Eval= run in-process and are not covered.
+- Reads are unrestricted inside the sandbox; only writes outside writable
+  dirs and network differ from the host.
+- Boundary-error detection (for the retry counter) matches common OS error
+  strings in tool results and is heuristic.
+
+* Local Analytics (opt-in)
+
+To know whether the permission layer is actually reducing prompt fatigue
+without sacrificing safety, =gptel-permit-analytics.el= records the full
+decision chain of tool calls in an append-only JSONL log. The data stays
+on your machine and never leaves Emacs — hence "analytics", not telemetry.
+The module is /inert/ until you explicitly register it; nothing is written,
+no advice is installed and no sampling occurs before that.
+
+** Events recorded
+
+Each event is one JSON line in =gptel-permit-analytics-file= and carries a
+correlation id, a timestamp and a type:
+
+- =tool-call=: the call itself (tool, buffer, backend, model, truncated
+  arguments), written when the permission hook evaluates the call.
+- =rule-match=: which rule matched and its action.
+- =verdict=: the hook verdict, including the judge's model, verdict and
+  rationale when the LLM judge was involved in the decision.
+- =confirm=: a manual prompt was shown.
+- =decision=: the user's resolution (allow / cancel / steer) together with
+  the milliseconds spent on the prompt. A cancel is recorded as an event,
+  not a terminal outcome (gptel permits resuming canceled calls).
+- =audit=: the call was an auto-allow that got audited by sampling (below).
+
+** Enabling
+
+#+begin_src elisp
+(use-package gptel-permit
+  :after gptel
+  :config
+  (gptel-permit-mode 1)
+  (require 'gptel-permit-analytics)
+  (gptel-permit-register-analytics-hooks))
+#+end_src
+
+=gptel-permit-register-analytics-hooks= (idempotent) installs
+decision-capture advice on gptel's =gptel--accept-tool-calls=,
+=gptel--reject-tool-calls= and =gptel--steer-tool-calls= — the only path
+through which every confirmation UI variant funnels — and sets
+=gptel-permit-analytics-enabled= to ~t~. =gptel-permit-unregister-analytics-hooks=
+removes everything again. Setting the =gptel-permit-analytics-enabled=
+option /alone/ does nothing: registration is the enablement.
+
+** Audit sampling
+
+While analytics is active, a configurable fraction
+(=gptel-permit-analytics-sample-rate=, default 0.2) of auto-allowed calls —
+rule ~allow~ or a successful ~sandbox~ — is randomly upgraded to a manual
+prompt. Your decision on these sampled calls measures the /false-allow
+rate/: a cancel or steer means the automation would have done something
+you didn't want. Deny verdicts are never sampled (asking a human to
+overrule a security veto trains the wrong reflex), and a sampled sandboxed
+call still runs inside the sandbox once you confirm it. Each sampled call
+is marked with an =audit= event.
+
+** Reporting
+
+Run =M-x gptel-permit-analytics-report= to render the statistics into the
+=*gptel-permit-analytics*= buffer: totals (calls, auto-allowed, asked,
+blocked, deferred), a per-tool breakdown (call counts, ask rate, average
+wait time), daily/weekly/monthly breakdowns, and the false-allow audit
+with its Wilson 95% confidence interval. For scripting, call the pure
+=gptel-permit-analytics-compute= function, which returns the same
+statistics as a plist without touching any buffer.
+
+** Privacy notes
+
+- The log file (=gptel-permit-analytics-file=, by default
+  =~/.emacs.d/gptel-permit-analytics.jsonl=) is created with =0600=
+  permissions.
+- Argument values are truncated (first and last 30 characters).
+- The file still contains tool names, commands and paths that ran on your
+  machine plus your decisions — keep it local, and delete it when you are
+  done measuring. Nothing is exported anywhere.
+
+** Caveat: advice on gptel internals
+
+Decision capture advises three gptel *internal* commands
+(=gptel--accept-tool-calls=, =gptel--reject-tool-calls=,
+=gptel--steer-tool-calls=). If gptel upstream changes them,
+=gptel-permit-analytics= must follow. The advice is fully gated: absent
+until registration, purely additive, and completely removed by
+=gptel-permit-unregister-analytics-hooks=. Analytics failures are logged
+and can never alter a permission verdict.

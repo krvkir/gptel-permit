@@ -21,19 +21,32 @@ validation SHALL always see the original, unwrapped command.
 - THEN the ask rule fires and returns `(:confirm t)` with the original
   command (no wrapping), so user approval runs it unsandboxed.
 
+#### Scenario: Tool without :command fails closed
+- GIVEN a rule `(:tool-group execute :action sandbox)` matching an Eval call
+- WHEN the call is evaluated (Eval carries `:expression`, not `:command`)
+- THEN the hook returns `(:confirm t)` and nothing is auto-run.
+
 ### Requirement: Builtin bwrap wrapper
 The builtin backend SHALL construct:
-`bwrap --die-with-parent --new-session --clearenv [--setenv V v]… --dev-bind / / --tmpfs /tmp [--unshare-net] [--bind DIR DIR]… [--ro-bind P P]… -- bash -c QUOTED`
+`bwrap --die-with-parent --new-session --clearenv [--setenv V v]… --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp [--unshare-net] [--bind DIR DIR]… [--ro-bind P P]… -- bash -c QUOTED`
 where writable binds come from `gptel-permit-sandbox-writable-dirs` (default:
 the project root), `--unshare-net` is present unless
 `gptel-permit-sandbox-network` is non-nil, env vars come from
 `gptel-permit-sandbox-env-keep`, and QUOTED is the original command through
-`shell-quote-argument`.
+POSIX single-quoting (quote-once semantics of `shell-quote-argument`).
+
+Note: the root MUST be bound read-only (`--ro-bind / /` plus fresh
+`--dev`/`--proc` mounts). The originally drafted `--dev-bind / /` shape was
+replaced during implementation: `--dev-bind` produces a read-WRITE root
+binding, which would have defeated the sandbox entirely (verified
+empirically against bubblewrap 0.12: `/etc` remained writable under
+`--dev-bind / /`, and stays read-only under `--ro-bind / /`).
 
 #### Scenario: Wrapper shape
 - GIVEN default settings, project root "/home/user/proj/", command "make test"
 - WHEN the wrapper is built
-- THEN it contains `--dev-bind / /`, `--tmpfs /tmp`, `--unshare-net`,
+- THEN it contains `--ro-bind / /`, `--dev /dev`, `--proc /proc`,
+  `--tmpfs /tmp`, `--unshare-net`,
   `--bind /home/user/proj/ /home/user/proj/`, and ends with
   `-- bash -c 'make test'`.
 
