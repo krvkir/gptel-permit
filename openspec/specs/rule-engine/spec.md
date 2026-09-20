@@ -2,15 +2,15 @@
 
 ## Purpose
 Match tool calls against permission rules, supporting both concrete tool/arg targets and group-based targets, regexp conditions and predicate conditions, and deterministic action resolution with session-local rules taking precedence over global rules.
-
 ## Requirements
-
 ### Requirement: Rule Structure
 A rule SHALL be a plist with keys `:tool`, `:tool-group`, `:conditions`, and `:action`.
 
 `:conditions` SHALL be an alist of `(TARGET . VALUE)` pairs where:
 - TARGET is either a concrete arg keyword (e.g. `:file_path`) or the keyword `:arg-group`.
-- VALUE is either a regexp string or a predicate keyword.
+- VALUE is one of: a regexp string, a predicate keyword, or a function
+  called as `(funcall VALUE arg-value tool-call)` whose non-nil return means
+  the condition matches.
 
 When `:tool` and `:tool-group` are both present in a rule, `:tool` SHALL take precedence and a warning SHALL be emitted.
 
@@ -30,6 +30,20 @@ When neither `:tool` nor `:tool-group` is present, the rule SHALL match any tool
 - AND test regexp "secret" against "/tmp/secret.txt" → match
 - AND return `deny`.
 
+#### Scenario: Callable condition matches
+- GIVEN a rule `(:tool-group execute :conditions ((:command . my-safe-p)) :action sandbox)`
+- AND `my-safe-p` is a function that returns t for read-only commands
+- WHEN matched against a Bash tool call with `:command "ls"`
+- THEN the engine SHALL call `my-safe-p` with the `:command` value and the
+  tool-call plist, and the non-nil result SHALL make the condition match.
+
+#### Scenario: Callable condition short-circuits
+- GIVEN a rule with two conditions, the first a callable that returns nil,
+  the second a callable
+- WHEN the rule is evaluated
+- THEN evaluation SHALL stop after the first nil condition
+- AND the second callable SHALL NOT be invoked.
+
 #### Scenario: Both :tool and :tool-group present
 - GIVEN the rule `(:tool "Read" :tool-group "write" :conditions ((:file_path . "secret")) :action deny)`
 - WHEN the rule engine evaluates this rule
@@ -45,14 +59,18 @@ When neither `:tool` nor `:tool-group` is present, the rule SHALL match any tool
 - AND the rule SHALL fire.
 
 ### Requirement: Predicate Conditions
-The system SHALL support built-in predicate keywords that are resolved at match time by calling functions with access to buffer context.
+The system SHALL support predicate keywords resolved at match time through
+a lookup alist `gptel-permit--condition-predicates` mapping each keyword to a
+named function called with `(value tool-call)`; the alist SHALL be user
+extensible.
 
 The built-in predicates SHALL include:
 - `:inside-project` — true if the normalized path is inside the current project root or buffer file directory.
 - `:outside-project` — true if the normalized path is outside the current project root / buffer file directory, or if neither can be resolved.
 - `:inside-protected-dirs` — true if the normalized path is inside any directory listed in `gptel-permit-protected-dirs`.
+- `:path-traversal` — true if the path contains `..` or is absolute.
 
-When the predicate keyword does not match any built-in, the condition SHALL fail with a logged warning.
+When the predicate keyword does not match any entry, the condition SHALL fail with a logged warning.
 
 #### Scenario: inside-project on a file in the project root
 - GIVEN `default-directory` is "/home/user/myproject/"
@@ -71,13 +89,11 @@ When the predicate keyword does not match any built-in, the condition SHALL fail
 - THEN no base directory can be resolved
 - AND the predicate SHALL return t (conservative: treat everything as outside).
 
-#### Scenario: inside-protected-dirs containment check
-- GIVEN `gptel-permit-protected-dirs` is `("~/.ssh/" "~/.gnupg/")`
-- AND a tool-call has `:path "/home/user/.ssh/config"`
-- WHEN the predicate `:inside-protected-dirs` is resolved
-- THEN `expand-file-name` resolves the path and each protected dir entry
-- AND `file-in-directory-p` of the expanded path against "~/.ssh/" returns t
-- AND the predicate SHALL return t.
+#### Scenario: Custom predicate keyword registered
+- GIVEN a user adds `(:inside-secrets . my-secrets-p)` to
+  `gptel-permit--condition-predicates`
+- WHEN a rule uses condition value `:inside-secrets`
+- THEN the engine SHALL call `my-secrets-p` for the match.
 
 ### Requirement: Match Algorithm — First Match Wins
 The rule engine SHALL evaluate rules in order: session-local rules (`gptel-permit-rules`) first, then global rules (`gptel-permit-global-rules`). The action of the /first/ rule where all conditions match SHALL be returned. No further rules SHALL be evaluated after a match.
@@ -159,3 +175,4 @@ The security hook function SHALL skip tool calls that already have `:result` or 
 - WHEN the security hook runs on the same tool call
 - THEN it SHALL detect the `:result` key
 - AND return nil immediately without evaluating any rules.
+

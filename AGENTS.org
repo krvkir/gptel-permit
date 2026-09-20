@@ -3,6 +3,7 @@ This project provides rule-based auto-approval of tool calls for gptel's agentic
 
 * Basic Project Structure
 - =gptel-permit.el= :: The rule engine core. Defines permission rules, condition predicates, the pre-tool-call security hook, and the global custom options.
+- =gptel-permit-judge.el= :: The optional `llm-judge` module: the `gptel-permit-judge-safe-p` condition callable, which asks a small local model whether an argument value is obviously safe. Fail-closed on every error path (never blocks; a failed judgement just makes the rule not match) and retains the verdict's rationale for analytics.
 - =gptel-permit-sandbox.el= :: The `sandbox` rule action: bubblewrap / srt command wrappers, protected-path detection, the pre-tool args-rewrite verdict, and the boundary-failure retry counter.
 - =gptel-permit-analytics.el= :: The optional `analytics` module: an append-only local JSONL decision log, audit sampling that up-ranks automation-allow verdicts to manual confirms, decision-capture advice on gptel's three interactive tool-call commands, and pure statistics/report functions. Inert until `gptel-permit-register-analytics-hooks` is called.
 - =tests/gptel-permit-test.el= :: ERT test suite covering argument normalization, rule matching, security hook behavior, and logging.
@@ -12,7 +13,7 @@ This project provides rule-based auto-approval of tool calls for gptel's agentic
 * Development Approach
 
 Agents SHALL keep changes small and testable:
-1. *Understand the hook protocol*: =gptel-permit--apply-rules= receives a plist of ~(:name :args :buffer :backend :model)~ and returns ~(:confirm nil)~ (auto-accept), ~(:confirm t)~ (force prompt), ~(:block "<reason>")~ (reject), ~(:confirm nil :args (:command …))~ (args rewrite; the sandbox verdict), or ~nil~ (defer).
+1. *Understand the hook protocol*: =gptel-permit--apply-rules= receives a plist of ~(:name :args :buffer :backend :model)~, where =:buffer= is the session buffer's name string (pass it through =get-buffer=, never =with-current-buffer= directly) and =:backend= the =gptel-backend= struct (pass it to =gptel-backend-name=). It returns ~(:confirm nil)~ (auto-accept), ~(:confirm t)~ (force prompt), ~(:block "<reason>")~ (reject), ~(:confirm nil :args (:command …))~ (args rewrite; the sandbox verdict), or ~nil~ (defer).
 2. *Match rules predictably*: Session-local rules (=gptel-permit-rules=) always take precedence over global rules (=gptel-permit-global-rules=). All conditions in a rule must match for the action to fire.
 3. *Never miss a hard block*: Path traversal checks in =Write= and =Mkdir= fire before any rule matching and cannot be overridden by rules.
 4. *Log when debugging*: Rule matching is silent by default. Set =gptel-permit-log-enabled= to =t= to write diagnostics into =*gptel-permit-log*=.
