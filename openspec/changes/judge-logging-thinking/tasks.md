@@ -16,3 +16,10 @@
 
 - [ ] 3.1 Byte-compile all gptel-permit files and run the full ERT suite (`make test`); fix regressions
 - [ ] 3.2 Manual pass with a live judge: one SAFE, one UNSAFE, one unparseable (force via a mock), one timeout — confirm log lines and (with analytics on) `judge-verdict` values in JSONL
+
+## 4. Live-pass fixes (defects found during task 3.2)
+
+- [X] 4.1 Isolate the judge request from the session: pass `:system nil` to `gptel-request` (no system message; verified with gptel dry-run payload probes), update the request-sync docstring, add a keyword-argument ERT test and an end-to-end payload test with a canary session system prompt
+- [X] 4.2 Leak-tolerant verdict parsing: strip `​`/`​` blocks, verdict = last line that is exactly SAFE or UNSAFE, conflicting standalone verdicts unparseable; ERT tests for stripping, leaked deliberation, think-block drafts, conflicts and glued verdicts
+- [X] 4.3 Truncate parse-fail raw responses via `gptel-permit--truncate-arg` (rationale variable + log line); ERT test
+- [X] 4.4 README (isolation note, leak tolerance, unparseable bullet) and spec-delta MODIFIED requirements; full `make test` (130 passing) + clean byte-compile

@@ -376,6 +376,21 @@ indistinguishable from nil in Emacs Lisp — there is no separate
 "empty" state; to suppress the derived thinking-off params, set a
 non-nil plist re-enabling what you want (e.g. =(:think t)= on Ollama).
 
+The judge request is also isolated from your session's persona: it
+is sent with no system message at all. Without this, =gptel-request=
+inherits the /buffer-local/ =gptel-system-prompt= of the calling gptel
+buffer — persona, oracle instructions, response-formatting rules — and
+prepends it to the judge prompt, where it fights the judge preamble
+("answer with SAFE or UNSAFE on the first line") and sends small
+models into out-loud deliberation about which instruction to obey.
+The judge model sees only its own security preamble.
+
+Some models keep deliberating regardless: Ollama =:cloud= models
+(e.g. =glm-5.3-flash:cloud=) ignore =think: false= and interleave their
+reasoning with the answer text. Verdict parsing tolerates this (see
+the next section); if it cannot find a standalone verdict, the call
+parse-fails and falls through to the next rule.
+
 ** Judge failure classes and the log
 
 Every judge outcome is distinguishable in the =*gptel-permit-log*=
@@ -384,8 +399,10 @@ buffer (enable it via =gptel-permit-log-enabled=):
 - =Judge verdict: safe rationale: …= / =Judge verdict: unsafe rationale: …= ::
   an evaluated verdict; the rule matches only on =safe=.
 - =Judge response unparseable: …= ::
-  the backend responded, but the first line was neither =SAFE= nor
-  =UNSAFE= — often a thinking model; the truncated raw response follows.
+  the backend responded, but no line of it (after stripping leaked
+  reasoning blocks) was exactly =SAFE= or =UNSAFE= — often a thinking
+  model that ignored the thinking-off request; the truncated raw
+  response follows.
 - =Judge request failed: …= ::
   the request itself failed: unknown backend name, HTTP error, or no
   response at all.
@@ -401,6 +418,16 @@ when the judge did not run) — which the analytics =judge-verdict=
 field carries verbatim, so a genuine =unsafe= is never confused with a
 judge that broke. All failure classes remain deny-only: the enclosing
 rule does not match and evaluation falls through.
+
+Verdict parsing is strict but reasoning-proof: =​= and
+=​' blocks are stripped first, then the verdict is the
+last line whose entire (trimmed) text is =SAFE= or =UNSAFE=, with the
+rationale taken from the lines after it. An exploratory =UNSAFE= draft
+followed by a =SAFE= conclusion (or vice versa) is treated as
+unparseable rather than guessed, and a verdict word glued into the
+middle of a longer line (a server concatenating thinking and answer
+text without a separator) does not count — both fall through to the
+next rule.
 
 * Local Analytics (opt-in)
 

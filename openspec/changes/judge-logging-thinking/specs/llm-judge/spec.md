@@ -15,8 +15,8 @@ C-g interruption (`Judge interrupted`), and unparseable responses
 unchanged: every failure class makes `gptel-permit-judge-safe-p` return nil.
 
 #### Scenario: Unparseable response is logged with raw text
-- **WHEN** the judge backend responds `Sure, let me think about this…` (first
-  line is neither SAFE nor UNSAFE)
+- **WHEN** the judge backend responds `Sure, let me think about this…` (no
+  standalone SAFE or UNSAFE line after reasoning-block stripping)
 - **THEN** `gptel-permit--judge-parse-verdict` returns nil
 - **AND** the log contains `Judge response unparseable: ` followed by the
   truncated response text
@@ -52,7 +52,8 @@ type — Anthropic `:thinking (:type "disabled")`, OpenAI `:reasoning_effort
 Ollama `:think :json-false` — and SHALL derive nil (no injection) for
 unrecognized backends. The judge SHALL log the effective params once per
 request. A non-nil `gptel-permit-judge-request-params` SHALL win over derived
-values; an explicitly empty list disables injection entirely.
+values; nil derives them (an empty plist is indistinguishable from nil in
+Emacs Lisp).
 
 #### Scenario: User params are passed through
 - GIVEN `gptel-permit-judge-request-params` is `(:reasoning_effort "low")` and
@@ -73,3 +74,82 @@ Anthropic backend
 third-party backend
 - **WHEN** the judge issues its request
 - **THEN** no thinking-related fields are injected and nothing is derived.
+
+## MODIFIED Requirements
+
+### Requirement: Judge condition callable
+The system SHALL provide `gptel-permit-judge-safe-p`, a condition function
+called as `(value tool-call)`, which returns non-nil only when a configured
+judge model explicitly answers SAFE for the given tool-call argument value.
+The judge SHALL be invoked synchronously with a hard timeout and SHALL never
+itself produce a block verdict; a negative, failed, or ambiguous judgement
+SHALL make the condition return nil so the enclosing rule does not match.
+
+#### Scenario: SAFE verdict matches
+- **WHEN** `gptel-permit-judge-safe-p` is called for a Bash `:command` and the
+  judge request returns "SAFE" as the first line
+- **THEN** the function returns t and stores the judge's rationale (the
+  remainder of the response) in `gptel-permit--last-judge-rationale`.
+
+#### Scenario: UNSAFE verdict does not match
+- **WHEN** the judge request returns "UNSAFE"
+- **THEN** the function returns nil and stores the rationale for audit.
+
+#### Scenario: Judge unconfigured
+- **WHEN** `gptel-permit-judge-backend` is nil
+- **THEN** the function returns nil without making any request.
+
+#### Scenario: Judge failure is fail-closed
+- **WHEN** the judge request errors, times out, is interrupted with C-g, or
+  returns text with no standalone SAFE or UNSAFE line (after stripping
+  leaked reasoning blocks)
+- **THEN** the function returns nil and the failure is logged via
+  `gptel-permit--log`.
+
+### Requirement: Judge verdict contract and rationale
+The judge prompt SHALL instruct the model to answer with SAFE or UNSAFE as
+the first line and one short rationale line after it. The parser SHALL strip
+reasoning blocks (`​' / `​') that leak into the answer before matching, and SHALL read the verdict
+from the last line whose entire trimmed text is exactly SAFE or UNSAFE
+(case-insensitive), with the rationale being the text after that line. If
+standalone SAFE and UNSAFE lines both appear, the response SHALL be treated
+as unparseable and the condition SHALL return nil. Anything else — including
+verdict words glued mid-line — is unparseable. The rationale SHALL be
+retained (`gptel-permit--last-judge-rationale`) for audit consumers, and
+SHALL be truncated via `gptel-permit--truncate-arg` when it is the raw
+response of a parse-fail.
+
+#### Scenario: Rationale captured
+- **WHEN** the judge responds "SAFE\nOnly writes inside the project"
+- **THEN** the condition returns t and the rationale "Only writes inside the
+  project" is available for analytics logging.
+
+#### Scenario: Leaked deliberation does not hide the verdict
+- **WHEN** a thinking model responds with lines of reasoning followed by a
+  standalone "SAFE" line and a rationale
+- **THEN** the verdict parses as `safe` with the text after that line as
+  the rationale.
+
+#### Scenario: Conflicting standalone verdicts are unparseable
+- **WHEN** the response contains a standalone "UNSAFE" line (an exploratory
+  draft) and a later standalone "SAFE" line
+- **THEN** the parser returns nil and the condition returns nil
+  (fail-closed).
+
+### Requirement: Judge request isolation
+The judge SHALL issue its request via `gptel-request` with tools, context,
+and streaming disabled, using `gptel-permit-judge-backend` and
+`gptel-permit-judge-model`, with no system message (`:system nil`) so the
+calling buffer's system prompt never reaches the judge, and SHALL NOT cause
+the pre-tool-call hooks to run on the judge's own request.
+
+#### Scenario: Judge request does not recurse into hooks
+- **WHEN** the judge issues its gptel-request
+- **THEN** `gptel-permit--apply-rules` is not invoked for the judge's
+  internal request (bare requests lack the pre-tool FSM state).
+
+#### Scenario: Session system prompt is not sent
+- GIVEN the calling gptel buffer has a buffer-local `gptel-system-prompt`
+- **WHEN** the judge issues its request
+- **THEN** the request payload carries no system message; the judge preamble
+  is the only role-setting text.

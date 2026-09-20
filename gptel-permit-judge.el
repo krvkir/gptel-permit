@@ -23,6 +23,10 @@
 ;; per-call classifiers are blind to multi-hop exploit chains (cf. Embrace
 ;; The Red's break of Claude Code auto mode), so the judge is a
 ;; friction-reducer, not a security boundary.
+;;
+;; Judge requests are isolated from the calling session: they carry no
+;; system message, so the session's persona never reaches the judge
+;; model, and leaked model reasoning cannot hide the verdict.
 
 ;;; Code:
 
@@ -85,7 +89,14 @@ derived default, e.g. keep a thinking judge on Anthropic with
 Caveat (Gemini): gptel's merge is shallow, so a `:generationConfig'
 here replaces any `:generationConfig' gptel builds itself (temperature,
 max tokens).  Judge requests are bare, so this clobbering is safe; do
-not use this plist to carry unrelated generation settings."
+not use this plist to carry unrelated generation settings.
+
+Caveat (Ollama cloud models): `:cloud'-tagged Ollama models have been
+observed to ignore the derived `:think :json-false' and interleave
+their reasoning with the answer text.  Verdict parsing tolerates
+leaked reasoning (see `gptel-permit--judge-parse-verdict'): thinking
+blocks are stripped and the verdict is read from the last standalone
+SAFE/UNSAFE line."
   :type '(choice (const :tag "Derive thinking-off params per backend" nil)
                  (plist :tag "Fixed plist of request parameters"
                         :key-type symbol :value-type sexp))
@@ -175,7 +186,7 @@ derives nil: nothing is injected and the model's default applies."
     ('gptel-anthropic '(:thinking (:type "disabled")))
     ('gptel-openai    '(:reasoning_effort "minimal"))
     ('gptel-gemini    '(:generationConfig
-                       (:thinkingConfig (:thinkingBudget 0))))
+                        (:thinkingConfig (:thinkingBudget 0))))
     ('gptel-ollama    '(:think :json-false))
     (_ nil)))
 
@@ -194,7 +205,11 @@ explicitly (including `user-error' from `gptel-get-backend'); the
 explicit (quit) handler plus `with-local-quit' in the body keep C-g
 interruptible.  The effective request parameters (see
 `gptel-permit-judge-request-params') are let-bound as
-`gptel--request-params' around the request and logged once."
+`gptel--request-params' around the request and logged once.  The
+request is issued with `:system nil': no system message is sent, so
+the calling buffer's system prompt — persona or role directive —
+never reaches the judge; the judge preamble is the only
+role-setting text the model sees."
   (let ((done nil)
         (resp nil)
         (status nil))
@@ -213,6 +228,7 @@ interruptible.  The effective request parameters (see
               (gptel-permit--log "Judge request params: %S"
                                  gptel--request-params)
               (gptel-request prompt
+                :system nil
                 :callback (lambda (response info)
                             (setq resp (when (stringp response) response)
                                   status (plist-get info :status)
@@ -235,17 +251,56 @@ interruptible.  The effective request parameters (see
                              gptel-permit-judge-timeout)
           (list :class 'timeout :response nil))))))
 
+(defun gptel-permit--judge-strip-thinking (response)
+  "Return RESPONSE with inline thinking blocks removed.
+Some models — notably Ollama cloud models that ignore the derived
+`:think :json-false' request field — interleave their reasoning with
+the answer, delimited by `​'/`​' or
+`​'/`​' blocks.  Both forms are removed
+(case-insensitively, lazily up to the first closing tag); unclosed
+blocks are left alone and text outside the blocks is kept."
+  (let ((case-fold-search t))
+    (replace-regexp-in-string
+     "\\(?:​\\(?:.\\|\n\\)*?​\\|<thinking>\\(?:.\\|\n\\)*?</thinking>\\)"
+     "" response)))
+
+
 (defun gptel-permit--judge-parse-verdict (response)
   "Parse RESPONSE into (VERDICT . RATIONALE), or nil if unparseable.
-VERDICT is the symbol `safe' or `unsafe'.  RATIONALE is the remainder of the
-response text (possibly empty).  Only an explicit first-line SAFE/UNSAFE
-parses; anything else returns nil."
+VERDICT is the symbol `safe' or `unsafe'.  RATIONALE is the text
+after the verdict line (possibly empty).
+
+Reasoning that leaks into the answer does not hide the verdict:
+thinking blocks are stripped first (see
+`gptel-permit--judge-strip-thinking'), and the verdict is the last
+line whose trimmed, upcased text is exactly SAFE or UNSAFE — thinking
+models draft and explore before their final answer, so earlier
+standalone verdict lines may exist.  If SAFE and UNSAFE both appear
+as standalone lines (an exploratory draft disagreeing with a later
+verdict), the response is unparseable: fail-closed, no guessing.
+Conforming responses (verdict on the first line) parse as before.
+Anything else — including a verdict word glued mid-line — returns
+nil."
   (when (stringp response)
-    (let ((lines (split-string (string-trim response) "\n")))
-      (pcase (string-trim (upcase (car lines)))
-        ("SAFE"   (cons 'safe   (string-trim (mapconcat #'identity (cdr lines) "\n"))))
-        ("UNSAFE" (cons 'unsafe (string-trim (mapconcat #'identity (cdr lines) "\n"))))
-        (_ nil)))))
+    (let* ((lines (split-string
+                   (string-trim (gptel-permit--judge-strip-thinking response))
+                   "\n"))
+           (hits (delq nil
+                       (seq-map-indexed
+                        (lambda (line idx)
+                          (pcase (string-trim (upcase line))
+                            ("SAFE"   (cons idx 'safe))
+                            ("UNSAFE" (cons idx 'unsafe))
+                            (_ nil)))
+                        lines)))
+           (values (delete-dups (mapcar #'cdr hits)))
+           (last-hit (car (last hits))))
+      (when (and last-hit (= (length values) 1))
+        (cons (cdr last-hit)
+              (string-trim
+               (mapconcat #'identity
+                          (nthcdr (1+ (car last-hit)) lines)
+                          "\n")))))))
 
 (defun gptel-permit--judge-evaluate (result)
   "Reduce judge request RESULT to a verdict and record it in this buffer.
