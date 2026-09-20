@@ -348,9 +348,16 @@ request, so they are merged into the request body:
 ;;   Anthropic: (:thinking (:type "disabled"))
 ;;   OpenAI:    (:reasoning_effort "minimal")
 ;;   Gemini:    (:generationConfig (:thinkingConfig (:thinkingBudget 0)))
-;;   Ollama:    (:think :json-false)
+;;   Ollama:    (:think :json-false) — (:think "low") for GPT-OSS models,
+;;              which ignore booleans (their trace cannot be fully disabled)
 ;; Unrecognized backends (incl. OpenAI Responses): nothing injected.
 #+end_src
+
+On Ollama the derivation is model-sensitive: =think: false= is a
+harmless no-op for models without a thinking capability (verified on
+Ollama 0.32.14), but GPT-OSS models ignore booleans entirely and take
+levels instead (=low=, =medium=, =high=; the trace cannot be fully
+disabled), so the judge derives the smallest level for them.
 
 To pin the judge request body yourself, set
 =gptel-permit-judge-request-params= to a plist; a non-nil value always
@@ -367,6 +374,8 @@ wins over the derived default. Copy-paste starting points:
       '(:generationConfig (:thinkingConfig (:thinkingBudget 512))))
 ;; Ollama judge that keeps thinking on (slow, but thorough):
 (setq gptel-permit-judge-request-params '(:think t))
+;; Ollama judge with a minimal thinking budget (a level, not a boolean):
+(setq gptel-permit-judge-request-params '(:think "low"))
 #+end_src
 
 Note: gptel's merge is shallow, so a =:generationConfig= here replaces

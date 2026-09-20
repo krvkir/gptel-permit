@@ -79,7 +79,9 @@ When nil (the default), thinking-off parameters are derived from the
 judge backend's type (see `gptel-permit--judge-thinking-off-params'):
 Anthropic `(:thinking (:type \"disabled\"))', OpenAI
 `(:reasoning_effort \"minimal\")', Gemini `(:generationConfig
-(:thinkingConfig (:thinkingBudget 0)))', Ollama `(:think :json-false)';
+(:thinkingConfig (:thinkingBudget 0)))', Ollama `(:think :json-false)'
+— or `(:think \"low\")' when the judge model's base name is a GPT-OSS
+model, which ignores booleans and cannot fully disable its trace;
 unrecognized backends derive nil (no injection).  Note that an empty
 plist is indistinguishable from nil in Emacs Lisp, so there is no
 separate \"empty\" state: set this to a non-nil plist to override the
@@ -174,20 +176,37 @@ tool call's :buffer (a buffer name string); each message is truncated."
                        )))
    "\n\n"))
 
-(defun gptel-permit--judge-thinking-off-params (backend)
+(defun gptel-permit--judge-ollama-think-params (model)
+  "Return thinking-off request params for the Ollama MODEL name.
+GPT-OSS models ignore boolean `think' and accept only levels, with the
+trace unable to be fully disabled, so the smallest accepted level,
+\"low\", is derived for them.  Every other model derives
+`:json-false', which Ollama treats as a harmless no-op for models
+without a thinking capability.  MODEL is matched on its base name
+(before the first \":\")."
+  (if (and (stringp model)
+           (equal "gpt-oss" (car (split-string model ":"))))
+      '(:think "low")
+    '(:think :json-false)))
+
+(defun gptel-permit--judge-thinking-off-params (backend &optional model)
   "Return a plist disabling model thinking for judge requests to BACKEND.
+MODEL is the judge model name (see `gptel-permit-judge-model'); the
+Ollama branch uses it — GPT-OSS models take a thinking level instead
+of a boolean (see `gptel-permit--judge-ollama-think-params').
 Matched on BACKEND's struct type via `type-of', so no backend library
 needs to be loaded to classify it: Anthropic gets thinking disabled,
 OpenAI (Completions) a minimal reasoning effort, Gemini a zero
-thinking budget and Ollama thinking turned off.  Any other backend
-type — including OpenAI Responses, whose `reasoning' grammar differs —
-derives nil: nothing is injected and the model's default applies."
+thinking budget and Ollama thinking turned off (or minimized, for
+GPT-OSS).  Any other backend type — including OpenAI Responses, whose
+`reasoning' grammar differs — derives nil: nothing is injected and
+the model's default applies."
   (pcase (type-of backend)
     ('gptel-anthropic '(:thinking (:type "disabled")))
     ('gptel-openai    '(:reasoning_effort "minimal"))
     ('gptel-gemini    '(:generationConfig
                         (:thinkingConfig (:thinkingBudget 0))))
-    ('gptel-ollama    '(:think :json-false))
+    ('gptel-ollama    (gptel-permit--judge-ollama-think-params model))
     (_ nil)))
 
 
@@ -219,7 +238,8 @@ role-setting text the model sees."
             (let* ((backend (gptel-get-backend gptel-permit-judge-backend))
                    (gptel--request-params
                     (or gptel-permit-judge-request-params
-                        (gptel-permit--judge-thinking-off-params backend)))
+                        (gptel-permit--judge-thinking-off-params
+                         backend gptel-permit-judge-model)))
                    (gptel-backend backend)
                    (gptel-model gptel-permit-judge-model)
                    (gptel-use-tools nil)

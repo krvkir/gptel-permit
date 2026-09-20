@@ -79,6 +79,16 @@ untruncated, contradicting the docstrings and this design.
    per request) so behavior is transparent. Only the four built-in backend
    structs are recognized — third-party backends get nil (no injection) rather
    than a guess.
+   The Ollama branch is model-sensitive: per
+   docs.ollama.com/capabilities/thinking, GPT-OSS models ignore boolean
+   `think` and accept only levels (`low`/`medium`/`high`, trace cannot be
+   fully disabled), so a judge model whose base name is `gpt-oss` derives
+   `(:think "low")`. Everything else derives `(:think :json-false)`, verified
+   on Ollama 0.32.14 to be a harmless no-op for models without a thinking
+   capability (thinking-capable qwen3.5:4b emits an empty trace with
+   `think: false`; non-thinking qwen2.5:7b returns normally); levels are
+   accepted by regular thinking models too (`think: "low"` shortens the
+   trace versus the default).
 
 5. **Gemini shallow-merge caveat accepted.** gptel's `:request-params` merge is
    shallow, so a plist with `:generationConfig` clobbers any backend-level

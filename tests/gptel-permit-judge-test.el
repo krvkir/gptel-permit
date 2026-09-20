@@ -288,7 +288,24 @@ value is in `gptel-permit-judge-test--captured-params'."
                   (gptel--make-gemini :name "g"))
                  '(:generationConfig (:thinkingConfig (:thinkingBudget 0)))))
   (should (equal (gptel-permit--judge-thinking-off-params
-                  (gptel--make-ollama :name "l"))
+                  (gptel--make-ollama :name "l") "qwen3:4b")
+                 '(:think :json-false))))
+
+(ert-deftest gptel-permit-judge-ollama-gpt-oss-derives-level ()
+  "GPT-OSS models ignore boolean think; they derive the low level."
+  (should (equal (gptel-permit--judge-thinking-off-params
+                  (gptel--make-ollama :name "l") "gpt-oss:20b")
+                 '(:think "low")))
+  (should (equal (gptel-permit--judge-thinking-off-params
+                  (gptel--make-ollama :name "l") "gpt-oss")
+                 '(:think "low")))
+  ;; No model or a non-gpt-oss model: the boolean is a harmless no-op
+  ;; for models without a thinking capability.
+  (should (equal (gptel-permit--judge-thinking-off-params
+                  (gptel--make-ollama :name "l") nil)
+                 '(:think :json-false)))
+  (should (equal (gptel-permit--judge-thinking-off-params
+                  (gptel--make-ollama :name "l") "gpt-ossx:8b")
                  '(:think :json-false))))
 
 (ert-deftest gptel-permit-judge-thinking-off-unknown-backend ()

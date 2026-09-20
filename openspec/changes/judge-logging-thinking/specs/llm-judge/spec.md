@@ -49,7 +49,9 @@ taking precedence over derived defaults. When nil, the judge SHALL derive
 backend-appropriate thinking-off parameters from the judge backend struct
 type — Anthropic `:thinking (:type "disabled")`, OpenAI `:reasoning_effort
 "minimal"`, Gemini `:generationConfig (:thinkingConfig (:thinkingBudget 0))`,
-Ollama `:think :json-false` — and SHALL derive nil (no injection) for
+Ollama `:think :json-false` — or `(:think "low")` when the judge model's
+base name is a GPT-OSS model, which ignores booleans and cannot fully
+disable its trace — and SHALL derive nil (no injection) for
 unrecognized backends. The judge SHALL log the effective params once per
 request. A non-nil `gptel-permit-judge-request-params` SHALL win over derived
 values; nil derives them (an empty plist is indistinguishable from nil in
@@ -74,6 +76,13 @@ Anthropic backend
 third-party backend
 - **WHEN** the judge issues its request
 - **THEN** no thinking-related fields are injected and nothing is derived.
+
+#### Scenario: GPT-OSS judge model derives a thinking level
+- GIVEN `gptel-permit-judge-request-params` is nil, the judge backend is an
+Ollama backend and `gptel-permit-judge-model` is "gpt-oss:20b"
+- **WHEN** the judge issues its request
+- **THEN** the request body carries `think` `"low"` instead of a boolean
+- **AND** the log records the derived params.
 
 ## MODIFIED Requirements
 
