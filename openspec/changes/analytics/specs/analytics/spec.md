@@ -35,9 +35,10 @@ permissions). Every event SHALL carry the common fields:
 - `type`: one of `tool-call`, `rule-match`, `verdict`, `confirm`, `audit`,
   `decision`;
 - `tool`: the tool name (omitted only for the id-less minibuffer-cancel
-  decision);
-- `day` (`YYYY-MM-DD`), `week` (ISO `YYYY-Www`), `month` (`YYYY-MM`):
-  period grouping fields.
+  decision).
+
+Events SHALL NOT store period grouping fields: the daily, weekly and
+monthly breakdowns are derived from `ts` when statistics are computed.
 
 The `tool-call` event SHALL add: `buffer` (name or null), `backend`
 (name or null), `model` (name or null), and `args` — an object mapping
@@ -54,12 +55,12 @@ the decision; omitted when the decision could not be correlated).
 
 Record examples (one line each in the file):
 
-    {"id":42,"ts":"2026-10-05T14:30:22.123+0300","type":"tool-call","tool":"Bash","buffer":"proj.org","backend":"OpenAI","model":"gptel-5","args":{"command":"make test"},"day":"2026-10-05","week":"2026-W40","month":"2026-10"}
-    {"id":42,"ts":"2026-10-05T14:30:22.130+0300","type":"rule-match","tool":"Bash","action":"judge:allow/ask","day":"2026-10-05","week":"2026-W40","month":"2026-10"}
-    {"id":42,"ts":"2026-10-05T14:30:22.131+0300","type":"verdict","tool":"Bash","action":"judge:allow/ask","confirm":true,"judge-model":"gptel-5-mini","judge-verdict":"safe","judge-rationale":"only writes inside the project","day":"2026-10-05","week":"2026-W40","month":"2026-10"}
-    {"id":42,"ts":"2026-10-05T14:30:22.132+0300","type":"confirm","tool":"Bash","day":"2026-10-05","week":"2026-W40","month":"2026-10"}
-    {"id":42,"ts":"2026-10-05T14:30:22.133+0300","type":"audit","tool":"Bash","rate":0.2,"day":"2026-10-05","week":"2026-W40","month":"2026-10"}
-    {"id":42,"ts":"2026-10-05T14:31:04.900+0300","type":"decision","tool":"Bash","choice":"allow","wait-ms":42768,"day":"2026-10-05","week":"2026-W40","month":"2026-10"}
+    {"id":42,"ts":"2026-10-05T14:30:22.123+0300","type":"tool-call","tool":"Bash","buffer":"proj.org","backend":"OpenAI","model":"gptel-5","args":{"command":"make test"}}
+    {"id":42,"ts":"2026-10-05T14:30:22.130+0300","type":"rule-match","tool":"Bash","action":"judge:allow/ask"}
+    {"id":42,"ts":"2026-10-05T14:30:22.131+0300","type":"verdict","tool":"Bash","action":"judge:allow/ask","confirm":true,"judge-model":"gptel-5-mini","judge-verdict":"safe","judge-rationale":"only writes inside the project"}
+    {"id":42,"ts":"2026-10-05T14:30:22.132+0300","type":"confirm","tool":"Bash"}
+    {"id":42,"ts":"2026-10-05T14:30:22.133+0300","type":"audit","tool":"Bash","rate":0.2}
+    {"id":42,"ts":"2026-10-05T14:31:04.900+0300","type":"decision","tool":"Bash","choice":"allow","wait-ms":42768}
 
 #### Scenario: Full chain for an asked call
 - GIVEN analytics enabled and a call that matches an ask rule
@@ -112,8 +113,9 @@ as an event, not a terminal outcome (gptel permits resuming canceled calls).
 `gptel-permit-analytics-compute` SHALL read the JSONL file and return a pure
 data structure with: total calls, auto-allowed count, asked count, blocked
 count, per-tool breakdown (calls, asked, ask-rate, average wait), period
-breakdowns (daily/weekly/monthly), and false-allow stats (audited count,
-user-overridden count, rate, Wilson 95% confidence interval).
+breakdowns (daily/weekly/monthly, derived from the events' `ts`
+timestamps rather than stored fields), and false-allow stats (audited
+count, user-overridden count, rate, Wilson 95% confidence interval).
 `gptel-permit-analytics-report` SHALL render that structure readably into a
 buffer. The two SHALL be independent functions so the data is scriptable.
 
@@ -122,3 +124,9 @@ buffer. The two SHALL be independent functions so the data is scriptable.
 - WHEN `gptel-permit-analytics-compute` runs
 - THEN false-allows reports audited 10, overridden 2, rate 0.2, and a
   Wilson 95% interval covering 0.2.
+
+#### Scenario: Period breakdowns derive from timestamps
+- GIVEN event records carrying `ts` and no period fields
+- WHEN `gptel-permit-analytics-compute` runs
+- THEN the daily, weekly and monthly breakdowns group the calls by period
+  values derived from the timestamps.

@@ -28,6 +28,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'iso8601)
 (require 'json)
 (require 'gptel)
 (require 'gptel-permit)
@@ -101,11 +102,18 @@ defcustom alone never enables anything."
   "Current time as an ISO-8601 string with millisecond precision."
   (format-time-string "%Y-%m-%dT%H:%M:%S.%3N%z"))
 
-(defun gptel-permit-analytics--period-fields ()
-  "Return the day/week/month grouping fields for the current time."
-  `((day . ,(format-time-string "%Y-%m-%d"))
-    (week . ,(format-time-string "%G-W%V"))
-    (month . ,(format-time-string "%Y-%m"))))
+(defun gptel-permit-analytics--period-plist (ts)
+  "Return (:day D :week W :month M) derived from the timestamp TS.
+Events do not store period fields; statistics derive the daily,
+weekly and monthly grouping from each event's `ts' (ISO-8601,
+millisecond precision, timezone-aware).  Returns nil when TS is
+missing or unparseable."
+  (when-let* ((time (and ts
+                         (ignore-errors
+                          (encode-time (iso8601-parse ts))))))
+    (list :day (format-time-string "%Y-%m-%d" time)
+          :week (format-time-string "%G-W%V" time)
+          :month (format-time-string "%Y-%m" time))))
 
 (defun gptel-permit-analytics--tool-info (tool-call)
   "Return (TOOL BUFFER BACKEND MODEL) strings for TOOL-CALL.
@@ -132,14 +140,14 @@ Any element is nil when the tool call carries no such information."
 
 (defun gptel-permit-analytics--base-event (type tool id &optional extra)
   "Return the common event fields for TYPE, TOOL and correlation ID.
-EXTRA holds the event-specific fields, placed before the period fields."
+EXTRA holds the event-specific fields.  Period grouping is derived
+from `ts' when statistics are computed, not stored in the events."
   (append
    `((id . ,id)
      (ts . ,(gptel-permit-analytics--ts))
      (type . ,type))
    (when tool `((tool . ,tool)))
-   extra
-   (gptel-permit-analytics--period-fields)))
+   extra))
 
 (defun gptel-permit-analytics--append-line (event-alist)
   "Append EVENT-ALIST to `gptel-permit-analytics-file' as one JSON line.
@@ -441,7 +449,9 @@ Returns nil when FILE is missing."
   row)
 
 (defun gptel-permit-analytics--outcome-table (events)
-  "Fold EVENTS into a hash table of per-call outcome plists keyed by id."
+  "Fold EVENTS into a hash table of per-call outcome plists keyed by id.
+Each row's period fields are derived from the call's first event's
+`ts' — events carry no period fields of their own."
   (let ((table (make-hash-table :test 'eql)))
     (dolist (event events table)
       (let ((id (gptel-permit-analytics--event-field event 'id))
@@ -449,18 +459,13 @@ Returns nil when FILE is missing."
         (when (numberp id)
           (let ((row (or (gethash id table)
                          (puthash id
-                                  (list :tool
-                                        (gptel-permit-analytics--event-field
-                                         event 'tool)
-                                        :day
-                                        (gptel-permit-analytics--event-field
-                                         event 'day)
-                                        :week
-                                        (gptel-permit-analytics--event-field
-                                         event 'week)
-                                        :month
-                                        (gptel-permit-analytics--event-field
-                                         event 'month))
+                                  (nconc
+                                   (list :tool
+                                         (gptel-permit-analytics--event-field
+                                          event 'tool))
+                                   (gptel-permit-analytics--period-plist
+                                    (gptel-permit-analytics--event-field
+                                     event 'ts)))
                                   table))))
             (puthash id (gptel-permit-analytics--fold-event row type event)
                      table)))))))

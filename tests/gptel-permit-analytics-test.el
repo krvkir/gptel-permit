@@ -483,45 +483,39 @@ everything; both are idempotent."
 (defun gptel-permit-analytics-test--write-fixture (file)
   "Write a deterministic analytics fixture to FILE.
 Ten audited Bash calls (2 overridden), two asks, one allow, one
-sandbox, one deny and one deferred call."
+sandbox, one deny and one deferred call.  Events carry only schema
+fields; the compute tests rely on period grouping being derived
+from `ts'."
   (with-temp-file file
     (cl-flet ((emit (id type tool &rest fields)
                 (insert (json-encode
-                         `((id . ,id) (ts . "2026-09-14T10:00:00.000+0000")
+                         `((id . ,id) (ts . "2026-09-14T12:00:00.000+0000")
                            (type . ,type) ,@(when tool `((tool . ,tool)))
                            ,@fields))
                         "\n")))
       (cl-loop for id from 1 to 10 do
                (let ((choice (if (memq id '(3 7)) "cancel" "allow")))
-                 (emit id "tool-call" "Bash"
-                       '(day . "2026-09-14") '(week . "2026-W37")
-                       '(month . "2026-09"))
+                 (emit id "tool-call" "Bash")
                  (emit id "verdict" "Bash" '(action . "allow"))
                  (emit id "audit" "Bash" '(rate . 0.2))
                  (emit id "confirm" "Bash")
                  (emit id "decision" "Bash" `(choice . ,choice)
                        '(wait-ms . 1000))))
-      (emit 11 "tool-call" "Read" '(day . "2026-09-14")
-            '(week . "2026-W37") '(month . "2026-09"))
+      (emit 11 "tool-call" "Read")
       (emit 11 "verdict" "Read" '(action . "ask") '(confirm . t))
       (emit 11 "confirm" "Read")
       (emit 11 "decision" "Read" '(choice . "allow") '(wait-ms . 500))
-      (emit 12 "tool-call" "Read" '(day . "2026-09-14")
-            '(week . "2026-W37") '(month . "2026-09"))
+      (emit 12 "tool-call" "Read")
       (emit 12 "verdict" "Read" '(action . "ask") '(confirm . t))
       (emit 12 "confirm" "Read")
       (emit 12 "decision" "Read" '(choice . "cancel") '(wait-ms . 1500))
-      (emit 13 "tool-call" "Grep" '(day . "2026-09-14")
-            '(week . "2026-W37") '(month . "2026-09"))
+      (emit 13 "tool-call" "Grep")
       (emit 13 "verdict" "Grep" '(action . "allow"))
-      (emit 14 "tool-call" "Bash" '(day . "2026-09-14")
-            '(week . "2026-W37") '(month . "2026-09"))
+      (emit 14 "tool-call" "Bash")
       (emit 14 "verdict" "Bash" '(action . "deny") '(block . "auto-denied"))
-      (emit 15 "tool-call" "Bash" '(day . "2026-09-14")
-            '(week . "2026-W37") '(month . "2026-09"))
+      (emit 15 "tool-call" "Bash")
       (emit 15 "verdict" "Bash" '(action . "sandbox"))
-      (emit 16 "tool-call" "Eval" '(day . "2026-09-14")
-            '(week . "2026-W37") '(month . "2026-09"))
+      (emit 16 "tool-call" "Eval")
       (emit 16 "verdict" "Eval" '(action . "none")))))
 
 (ert-deftest gptel-permit-analytics-compute-fixture ()
