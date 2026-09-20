@@ -1,79 +1,95 @@
 ## Why
 
 The judge is currently only usable as a sync condition: the whole interface
-freezes in `accept-process-output` for the judge's latency (seconds). The tool
-caller process should wait for the judge, not the user. Making the judge an
-*action* — `(judge . allow)` / `(judge . sandbox)` — gives a clean async
-shape with **zero changes to gptel**: the hook returns `(:confirm t)`
-immediately, the pending-confirmation UI appears, and a judge callback
-auto-accepts the call when the verdict is SAFE. The prompt-while-judging
-tradeoff (visible confirm that auto-vanishes on SAFE) is accepted for now; the
-later `judge-async-defer` change replaces the prompt-park with an invisible
-park via a small gptel patch.
+freezes in `accept-process-output` for the judge's latency (seconds). The
+primary goal of asynchronous judging is to keep *other* buffers — the rest
+of Emacs — fully usable while the judge thinks; keeping the session buffer
+itself free of a prompt during the wait is a nice-to-have, not a
+requirement. Making the judge an *action* gives a clean async shape with
+**zero changes to gptel**: the hook returns `(:confirm t)` immediately, the
+pending-confirmation UI appears, and a judge callback applies the verdict's
+resolution when it lands. The prompt-while-judging tradeoff (visible confirm
+that auto-vanishes on SAFE) is accepted for now; the optional
+`judge-async-defer` change (a small gptel patch) can later remove the
+prompt flash if it proves annoying in practice.
 
 ## What Changes
 
-- New rule action form `(judge . ACTION)` with `ACTION` ∈ `allow`, `sandbox`:
-  the rule matches on its conditions as usual, but the verdict comes from the
-  judge — SAFE applies ACTION, UNSAFE or any failure falls through to later
-  rules (first-match-wins is preserved: the judge rule itself is not re-run,
-  evaluation continues *after* it).
-- `gptel-permit-judge-async` defcustom (default `t`): async mode as described;
-  `nil` runs the judge action synchronously (blocking, identical UX to the
-  condition form today). The existing *condition* form
+- New judge action forms for the `:action` rule slot, covering both
+  verdicts:
+  - bare `judge` ≡ `(judge allow ask)` — accept on SAFE, ask on UNSAFE;
+  - `(judge ACTION)` — apply ACTION on SAFE, ask on UNSAFE (e.g.
+    `(judge sandbox)`);
+  - `(judge ON-SAFE ON-UNSAFE)` — different actions per verdict (e.g.
+    `(judge sandbox deny)`; `(judge allow sandbox)` runs a SAFE call
+    directly but sandboxes an UNSAFE one).
+  ON-SAFE/ON-UNSAFE SHALL be any existing action: `allow`, `deny`, `ask`,
+  `sandbox`. Malformed forms log a warning and act as `ask` (fail-closed).
+- Judge-as-action semantics: the judge sits in the action slot, so it does
+  NOT determine rule applicability. The rule matches on its conditions
+  exactly like any other rule (first-match-wins; no fall-through to later
+  rules on UNSAFE — that is the condition form's job). The judge determines
+  the *resolution* of the matched rule: SAFE → ON-SAFE, UNSAFE → ON-UNSAFE,
+  judge failure (timeout, unparseable, failed request) → manual
+  confirmation. A `deny` resolution's block reason SHALL include the
+  judge's rationale.
+- `gptel-permit-judge-async` defcustom (default `t`): async mode as
+  described; `nil` evaluates the judge action synchronously (blocking,
+  identical verdict mapping). The existing *condition* form
   (`gptel-permit-judge-safe-p` in `:conditions`) remains unchanged and
   synchronous.
-- Async flow: the hook fires a `gptel-request` (non-blocking) and returns
-  `(:confirm t)`; a watchdog timer (`gptel-permit-judge-timeout`) resolves
-  the pending call as failed if no response arrives. The callback stashes its
-  pending-call context (buffer, tool-call, action) before the request.
-- Callback resolution: SAFE → locate the pending-confirmation overlay by
-  tool-call identity; **auto-accept the pack only if every pending call in the
-  pack is judge-gated and has a SAFE verdict** (a pack containing any
-  non-judged call stays on the prompt — no auto-running calls the judge never
-  saw). `(judge . sandbox)` rewrites the args through the sandbox adapter
-  registry before accepting. UNSAFE/failure/timeout → leave the prompt for
-  the human (fail-closed by inaction) with a log line and a transient
-  message.
+- Async flow: the hook fires a non-blocking judge request and returns
+  `(:confirm t)` immediately; a watchdog bounded by
+  `gptel-permit-judge-timeout` resolves the pending call as failed if no
+  response arrives.
+- Callback resolution: the verdict's ON-SAFE/ON-UNSAFE action is applied to
+  the pending-confirmation pack — programmatically only when every pending
+  call in the pack is judge-gated and all resolutions are uniform:
+  all accept-class (allow, sandbox with args rewritten through the sandbox
+  adapter registry) → the pack is accepted; all `deny` → the pack is
+  rejected with the judge rationales fed back to the model. Any mixture,
+  any `ask` resolution, any non-judged call, or audit-sampled call → the
+  prompt stays for the human (fail-closed by inaction).
+- Judging indicator: while a judge verdict is pending, the tool-call prompt
+  displays a "judging…" indicator, removed when the pack resolves or the
+  user answers.
 - Race guards: the callback no-ops when the buffer is dead, the overlay is
-  gone, or the stashed call already has a result (the user acted first — their
-  decision wins).
-- Analytics: a new `judge-verdict` event type records the verdict/rationale
-  when the async verdict lands (correlated with the original tool-call id);
-  a programmatic auto-accept records a `decision` event with
-  `choice: auto-allow`. The per-call judge state vars
-  (`gptel-permit--last-judge-verdict` etc.) are set by the callback with
-  `with-current-buffer` for audit consumers.
+  gone, or the stashed call already has a result (the user acted first —
+  their decision wins).
+- Analytics: a `judge-verdict` event records the verdict/rationale when it
+  lands (correlated with the tool-call id); programmatic resolutions are
+  recorded as `decision` events with `auto-allow`/`deny` choices distinct
+  from user decisions; audit sampling extends to judge-gated calls — the
+  judge still runs and is logged, but the resolution is forced to a manual
+  confirmation whatever the verdict.
 
 ## Capabilities
 
-### New Capabilities
-- `judge-action`: the `(judge . ACTION)` rule action — matching semantics,
-  SAFE/UNSAFE resolution, sync/async modes, pack auto-accept gating, and the
-  sandbox handoff.
-
 ### Modified Capabilities
-- `rule-engine`: `:action` gains the `(judge . ACTION)` cons form in its
-  action space; first-match-wins evaluation gains one exception: a judge
-  action that does not resolve SAFE continues scanning from the next rule.
-- `analytics`: event schema gains the `judge-verdict` type; programmatic
-  auto-accepts are recorded as decisions with an `auto-allow` choice distinct
-  from user `allow`.
-- `llm-judge`: async request mode and the watchdog reuse the failure classes
-  from `judge-logging-thinking`; the condition form is untouched.
+- `llm-judge`: the judge action forms (grammar and verdict semantics),
+  async request mode, prompt-mode resolution semantics, pack gating, the
+  judging indicator, and the sync mode. The condition form is untouched.
+- `rule-engine`: the `:action` slot grammar gains the judge forms
+  (`judge`, `(judge A)`, `(judge A B)`).
+- `analytics`: `judge-verdict` event type; `auto-allow`/`deny` programmatic
+  decision choices; sampling suppression of programmatic judge resolutions;
+  serialization of list-form judge actions in rule-match/verdict events.
 
 ## Impact
 
 - Code: `gptel-permit-judge.el` (async request path, callback resolution,
-  watchdog), `gptel-permit.el` (action cons dispatch in `--apply-rules`,
-  continue-scan-after-judge rule evaluation), `gptel-permit-analytics.el`
-  (`judge-verdict` event type, `auto-allow` decision choice), README.
+  watchdog, indicator), `gptel-permit.el` (judge action dispatch in
+  `--apply-rules`), `gptel-permit-analytics.el` (judge-verdict events,
+  programmatic decision choices, sampling suppression, action
+  serialization), README.
 - Hook pipeline: `gptel-pre-tool-call-functions` contract unchanged —
   async mode just returns `(:confirm t)`; all gptel interaction happens via
   the documented pending-confirmation overlay (`gptel--accept-tool-calls`
-  with possibly-edited triples).
+  with possibly-edited triples; a deny resolution feeds each pending call's
+  result callback with the block reason and cleans up, mirroring gptel's
+  steer path).
 - Dependencies: builds on `judge-logging-thinking` (failure classes,
-  `gptel-permit-judge-request-params`) and `sandbox-backend-registry` (adapter
-  registry for `(judge . sandbox)`); must be implemented after both. The
-  follow-up `judge-async-defer` change supersedes this one's
-  prompt-while-judging mechanics without changing the rule DSL.
+  `gptel-permit-judge-request-params`) and `sandbox-backend-registry`
+  (adapter registry for `(judge … sandbox)` resolutions); must be
+  implemented after both. The optional `judge-async-defer` change later
+  adds a prompt-free parking mode without changing the rule DSL.

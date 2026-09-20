@@ -22,8 +22,9 @@ possibly-edited tool call lists; `gptel-tool-call-actions-map` binds
 **Goals:**
 - Honest backend naming and platform-aware `auto` that fails closed visibly
   when no backend is available.
-- Two extension points — backends and tool adapters — sufficient for a
-  third-party sandbox and for the future `Eval` adapter without core changes.
+- A backend contract that is explicit, documented, and discoverable —
+  enough structure that a third-party sandbox and the future `Eval`
+  adapter plug in without touching the sandbox core.
 - One source of truth for protected paths, with project-root-relative `./`
   entries working identically for rules and sandbox.
 - Understandable failure gating: sticky latch + explicit reset command.
@@ -38,59 +39,107 @@ possibly-edited tool call lists; `gptel-tool-call-actions-map` binds
 
 ## Decisions
 
-1. **Backend registry shape: `SYMBOL → (:available-p FN :wrap FN)`.**
-   `:wrap (command root) → string` keeps the existing
-   `--sandbox-wrap-bwrap`/`--sandbox-wrap-srt` signatures untouched — the
-   shipped entries are thin structs around them. Dispatch goes through
-   `alist-get` on the resolved symbol; unknown symbol → fail-closed
-   `(:confirm t)` + log. *Alternative rejected:* defclass-based backend
-   objects — heavier than needed for a 2-function contract, worse to
-   document in customize.
+1. **Backend contract: EIEIO classes + generic functions (CLOS).**
+   Base class `gptel-permit-sandbox-backend` (stateless, no slots). The
+   contract is two `cl-defgeneric`s:
 
-2. **`auto` resolver is a function over the registry, memoized per session.**
+   ```elisp
+   (cl-defgeneric gptel-permit-sandbox-available-p (backend)
+     "Return non-nil when BACKEND can run on this system.")
+   (cl-defgeneric gptel-permit-sandbox-wrap (backend command root)
+     "Return the sandboxed invocation string for COMMAND (project ROOT).")
+   ```
+
+   Stock backends subclass and specialize:
+
+   ```elisp
+   ;; gptel-permit-sandbox-bwrap.el
+   (defclass gptel-permit-sandbox-backend-bwrap
+     (gptel-permit-sandbox-backend) ())
+   (cl-defmethod gptel-permit-sandbox-available-p
+     ((_ gptel-permit-sandbox-backend-bwrap))
+     (and (memq system-type '(gnu/linux)) (executable-find "bwrap")))
+   (cl-defmethod gptel-permit-sandbox-wrap
+     ((_ gptel-permit-sandbox-backend-bwrap) command root) …)
+   ```
+
+   A third-party backend is a subclass + two `cl-defmethod`s + one
+   `add-to-list`:
+
+   ```elisp
+   (defclass my-nsjail-backend (gptel-permit-sandbox-backend) ())
+   (cl-defmethod gptel-permit-sandbox-available-p ((_ my-nsjail-backend))
+     (executable-find "nsjail"))
+   (cl-defmethod gptel-permit-sandbox-wrap ((_ my-nsjail-backend) command root)
+     (format "nsjail … %s" command))
+   (add-to-list 'gptel-permit-sandbox-backends '(nsjail . my-nsjail-backend))
+   ```
+
+   *Why CLOS over the earlier plist shape* (`SYMBOL → (:available-p FN
+   :wrap FN)`): the generic functions *are* the documented contract —
+   signatures and docstrings live on the generics (`C-h f
+   gptel-permit-sandbox-wrap` shows every implementation), methods are
+   greppable, and subclassing gives shared-beavior hooks the plist cannot.
+   The registry stays customize-friendly because it maps symbol → *class
+   symbol* (plain printable data), not objects. Dispatch instantiates one
+   stateless instance per class (cached in a small hash table keyed by
+   class). Cost: authoring a backend is a subclass + two methods instead of
+   one alist entry — acceptable ceremony for a security-relevant contract.
+   *Alternative rejected:* `cl-defstruct` with function slots — typed but
+   the contract is not named/discoverable, and method dispatch is manual.
+
+2. **Stock backends in their own modules.**
+   `gptel-permit-sandbox-bwrap.el` / `gptel-permit-sandbox-srt.el`: each
+   defines its class, its two methods, and appends its entry to
+   `gptel-permit-sandbox-backends` at load. `gptel-permit-sandbox.el`
+   `require`s both (they are tiny, pure, and dependency-free); the defcustom
+   default is built after the requires so the default registry is
+   `((bwrap . gptel-permit-sandbox-backend-bwrap)
+   (srt . gptel-permit-sandbox-backend-srt))`. The core retains the
+   registry, resolver, adapter dispatch, latch, and hotkey — no
+   backend-specific argv construction. AGENTS.org's project-structure list
+   gains the two files.
+
+3. **`auto` resolver is a function over the registry, memoized per session.**
    `gptel-permit--sandbox-resolve-backend`: `gnu/linux` → `bwrap`; otherwise
-   first registered backend whose `:available-p` holds (registration order),
-   else nil. Memoize the result; re-resolve when
-   `gptel-permit-sandbox-backends` is changed (`set` in the defcustom
-   setter) or when the resolved backend's `:available-p` later returns nil
-   (checked at wrap time anyway — availability is re-verified per call, so
-   memoization only affects *choice*, not safety).
-   *Why a platform check at all:* bwrap is Linux-only (bubblewrap needs user
-   namespaces); srt is the cross-platform candidate. Non-Linux + no srt →
-   nil → fail-closed with a clear message, instead of silently claiming
+   first registered backend (registry order) whose available-p method
+   returns non-nil, else nil. Memoize the result; re-resolve when
+   `gptel-permit-sandbox-backends` changes (defcustom setter) — availability
+   is re-verified at wrap time per call, so memoization only affects
+   *choice*, not safety. Resolution is logged.
+   *Why a platform check at all:* bwrap needs Linux user namespaces; srt is
+   the cross-platform candidate. Non-Linux + no available backend → nil →
+   fail-closed with a clear message, instead of silently claiming
    `builtin` and failing on every call.
 
-3. **Tool adapters are per-tool-name args rewriters.**
-   `gptel-permit-sandbox-adapters`: `"Bash" → (:wrap-args (args root) → args)`
-   default entry. The adapter returns a *new args plist*; the sandbox action
-   uses `(plist-put (copy-sequence args) :command wrapped)` for Bash exactly
-   as today. Missing adapter → `(:confirm t)` + message (fail-closed, no
-   guessing which key to wrap). *Why adapters keyed by tool name, not by
-   arg-key:* the Eval case — spawn a sandboxed Emacs subprocess holding the
-   expression — cannot be expressed as "wrap some string arg"; it needs a
-   whole different execution strategy, which lives behind the same
-   `:wrap-args` contract (the adapter may also return a verdict with
-   `:confirm t` when its own mechanics are unavailable).
-   *Note:* adapters wrap; they do not execute. Execution stays gptel's
-   (`:confirm nil` + rewritten args runs the tool as usual). The Eval
-   adapter's subprocess design: `bwrap … emacs --batch --eval EXPR` (or a
-   persistent sandboxed Emacs daemon for speed) — out of scope here, but the
-   registry contract must not preclude it, hence args-in/args-out rather
-   than string-in/string-out.
+4. **Tool adapters stay function-valued — deliberate asymmetry.**
+   `gptel-permit-sandbox-adapters`: `"Bash" → (:wrap-args (args root) →
+   new-args)`. Missing adapter → `(:confirm t)` + message (fail-closed, no
+   guessing which key to wrap). *Why not CLOS here:* an adapter is a
+   single-function contract and the alist keyed by tool name *is* the
+   dispatch — a generic would add ceremony without polymorphism. Backends,
+   by contrast, are a multi-method contract where CLOS pays for itself.
+   Adapters rewrite arguments only — they SHALL NOT execute anything;
+   execution stays gptel's (`:confirm nil` + rewritten args runs the tool
+   as usual). The adapter contract must still support whole-call mechanics
+   (the future Eval adapter: spawn a sandboxed Emacs subprocess holding the
+   expression), hence args-in/args-out rather than string-in/string-out;
+   an adapter whose own mechanics are unavailable may return a
+   `(:confirm t)`-style verdict instead of args.
 
-4. **Protected paths: single source, shared `./` semantics.**
+5. **Protected paths: single source, shared `./` semantics.**
    New core helper `gptel-permit--expand-protected-dir (dir &optional root)`:
    strings starting `./` resolve against `(gptel-permit--project-root)`
    (else `default-directory`); others go through `expand-file-name` (`~/`
    etc. unchanged). Used by `gptel-permit--inside-protected-dirs-p` and by
    the sandbox candidate builder. `gptel-permit-protected-dirs` default
    becomes `("~/.ssh/" "~/.gnupg/" "./.git")`. Sandbox drops its hardcoded
-   `ROOT/.git` / `~/.ssh` / `~/.gnupg` (now redundant with the default).
+   entries (now redundant with the default).
    *Why `./` prefix:* matches the mental model of `.gitignore`-style
    project-relative paths and needs no new syntax. Nonexistent entries are
    still skipped at wrap time (bwrap can only bind existing paths).
 
-5. **Sticky latch + explicit reset.** On reaching
+6. **Sticky latch + explicit reset.** On reaching
    `gptel-permit-sandbox-retry-limit` consecutive boundary failures, set
    buffer-local `gptel-permit--sandbox-latched` (new var;
    `gptel-permit--sandbox-fail-streak` remains the counter). While latched,
@@ -105,7 +154,7 @@ possibly-edited tool call lists; `gptel-tool-call-actions-map` binds
    `--remember` registry stays as-is (it exists so the post-tool hook can
    attribute results to sandboxed commands — docstring gets this).
 
-6. **`C-c C-s` = `gptel-permit-accept-tool-calls-sandboxed`, all-or-nothing.**
+7. **`C-c C-s` = `gptel-permit-accept-tool-calls-sandboxed`, all-or-nothing.**
    Reads the pending triples from the overlay at point
    (`get-char-property-and-overlay` like `gptel--accept-tool-calls`), runs
    each call's args through the tool's adapter, and delegates to
@@ -121,13 +170,12 @@ possibly-edited tool call lists; `gptel-tool-call-actions-map` binds
    upstream behavior; `C-c C-s` is free, memorable ("s"andbox), and
    `describe-keymap`-discoverable.
 
-7. **Analytics pending-key fix for rewritten args.** The decision advice
+8. **Analytics pending-key fix for rewritten args.** The decision advice
    pops pending confirmations by `(buffer tool args)`. Wrapping rewrites
    args between confirm and accept, orphaning the entry. The sandbox
-   accept path (hotkey and, later, judge callbacks) SHALL emit the decision
-   event itself (or pop the pending entry with pre-rewrite args) so
-   wait-time stats stay correct. Concretely: the hotkey pops the pending
-   key for the *original* args before delegating to accept.
+   accept path (hotkey and, later, judge callbacks) SHALL pop the pending
+   key for the *original* args before delegating to accept, so
+   wait-time stats stay correct.
 
 ## Risks / Trade-offs
 
@@ -135,11 +183,14 @@ possibly-edited tool call lists; `gptel-tool-call-actions-map` binds
   .git/ssh/gnupg sandbox binds] → Accepted: no such users exist yet; README
   migration note says to add them to the option explicitly (they are in the
   new default).
-- [Registry misuse — a broken `:wrap` could produce a non-sandboxing
-  command string] → The adapter/backend contract is documented as
+- [Registry misuse — a broken `wrap` method could produce a non-sandboxing
+  command string] → The backend contract is documented as
   *security-relevant*; fail-closed checks (missing backend, missing
-  adapter, nil return from `:wrap`) apply uniformly; `auto` only picks
+  adapter, nil return from `wrap`) apply uniformly; `auto` only picks
   among backends that declare themselves available.
+- [EIEIO ceremony discourages casual backends] → Accepted: sandboxing is
+  security-relevant infrastructure, not a quick hook; the shipped
+  bwrap/srt classes double as copy-paste templates in the README.
 - [Memoized `auto` picks a backend that later disappears] → Availability
   is re-checked at every wrap; a missing binary fails closed per call.
 - [Latch makes an unattended session stall on sandboxed calls] → That is

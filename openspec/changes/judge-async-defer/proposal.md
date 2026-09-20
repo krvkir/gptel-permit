@@ -1,15 +1,21 @@
 ## Why
 
-`judge-async-action` removes the UI freeze but parks judged calls on the
-confirmation prompt while judging: the prompt flashes, the user can race the
-judge, and UNSAFE verdicts leave a prompt where none was semantically
-needed. gptel has no deferred-verdict hook mechanism — a hook must return
-its verdict synchronously — so we add one: a small, upstreamable patch to
-gptel (~10 lines across three functions plus a resolver helper) that lets a
-pre-tool hook mark a call as pending-resumption, keeps the FSM parked
-invisibly until the verdict arrives, and re-runs the tool-use state with the
-merged verdict. With it, judging is both asynchronous *and* invisible: no
-prompt, no race, no rules silently dropped.
+`judge-async-action` meets the primary async goal — other buffers stay
+fully usable — but parks judged calls on the confirmation prompt while
+judging: the prompt flashes, the user can race the judge, and an
+`ask`-resolution call shows a prompt that could have been avoided. This
+change is the optional polish: gptel has no deferred-verdict hook
+mechanism — a hook must return its verdict synchronously — so we add one:
+a small, upstreamable patch to gptel (~3 edit sites plus a resolver
+helper) that lets a pre-tool hook mark a call as pending-resumption, keeps
+the FSM parked invisibly until the verdict arrives, and resolves the call
+with the merged verdict. With it, judging is asynchronous *and* invisible:
+no prompt, no race.
+
+**Status: optional.** Land only if the prompt flash proves annoying in
+practice after `judge-async-action` has been used for a while. Nothing in
+the rule DSL or the analytics depends on this change; it is a pure parking
+mechanics swap behind the same `gptel-permit-judge-async` option.
 
 ## What Changes
 
@@ -27,31 +33,34 @@ prompt, no race, no rules silently dropped.
      to TOOL (skipping TPRE so hooks never see rewritten args — matching
      the sync path where the post-hook merge goes straight to TOOL).
   4. The hook plist gains `:fsm` (the request's FSM) so permit callbacks can
-     reach the resolver; a feature flag (`gptel--tool-call-defer-p` boundp
-     check) enables detection.
+     reach the resolver; feature detection via the resolver's presence.
   - No patch to `gptel--process-tool-call` is needed: the remaining-count
     (`(not (plist-get call :result))`) already includes deferred calls, so
     the FSM naturally parks in TOOL while a deferred call is unresolved.
   - The patch is documented in the gptel repo as a dated design note
     (that repo's convention).
-- **permit side**: `gptel-permit-judge-async` gains the value `defer` (and
-  `auto`): in defer mode, the judge-action hook stashes
-  `(fsm tool-call rule-index action timer)`, fires the async judge request,
-  and returns `(:defer t)`. The callback resolves:
-  - SAFE → `gptel--resolve-tool-call` with the paired action's verdict
-    (`sandbox` args rewritten through the adapter registry first);
-  - UNSAFE/failure/timeout → re-scan rules starting at the stashed
-    rule-index+1 (current rule state, synchronous, no new judge request)
-    and resolve with the first matching rule's verdict — or with an empty
-    verdict (gptel's own confirm defaults) when no later rule matches;
-  - user abort/buffer dead/call already `:result`ed → no-op with a log line.
-- **Mode default**: `gptel-permit-judge-async` becomes `auto` — `defer` when
-  the patched gptel is detected, else `prompt` (the `judge-async-action`
-  mechanics), else configurable `nil` (sync). `prompt` remains available as
-  an explicit choice.
-- **Analytics**: verdict events now carry a `judge-latency-ms` field (verdict
-  arrival minus request issue); auto-accepts are recorded as `auto-allow`
-  decisions exactly as in `judge-async-action`.
+- **permit side**: `gptel-permit-judge-async` gains the values `defer` and
+  `auto`. In defer mode, the judge-action hook stashes
+  `(fsm tool-call-identity on-safe on-unsafe timer)` — the same
+  verdict→action mapping context as prompt mode — fires the async judge
+  request, and returns `(:defer t)`. The callback resolves the call
+  individually through `gptel--resolve-tool-call` with the mapping's
+  verdict:
+  - SAFE → the ON-SAFE action's verdict (`sandbox` resolves with args
+    rewritten through the adapter registry);
+  - UNSAFE → the ON-UNSAFE action's verdict (`deny` feeds the
+    rationale-bearing reason; `ask` surfaces the prompt at that point);
+  - failure or audit-sampled call → the manual-confirmation verdict (the
+    prompt appears exactly when a human is needed).
+  No rule re-scan happens on any path: the matched judge rule owns the
+  call, identically to sync and prompt modes — the grammar's ON-UNSAFE
+  slot already expresses the negative resolution, so the earlier
+  design's rule-index continuation machinery is unnecessary.
+- **Mode default**: `gptel-permit-judge-async` becomes `auto` — `defer`
+  when the patched gptel is detected, else `prompt` (the
+  `judge-async-action` mechanics), else configurable `nil` (sync).
+  `prompt` remains available as an explicit choice; the old `t` value
+  reads as `prompt`.
 
 ## Capabilities
 
@@ -63,24 +72,25 @@ prompt, no race, no rules silently dropped.
   patch).
 
 ### Modified Capabilities
-- `judge-action`: the async resolution requirement gains the defer mode —
-  invisible park instead of prompt-park, callback-driven resolution via the
-  resolver, and UNSAFE fall-through to later rules (which `prompt` mode
-  deliberately lacks).
-- `llm-judge`: the async request mode requirement gains the defer-mode
-  watchdog behavior (timeout resolves via the resolver with fall-through,
-  not by leaving a prompt).
+- `llm-judge`: the async resolution requirement gains the defer parking
+  mode — invisible park instead of prompt-park, per-call callback
+  resolution via the resolver, with the same verdict→action mapping and
+  fail-closed rules.
+- `analytics`: no new requirements — the judge-verdict event (with
+  latency) and the programmatic decision choices from `judge-async-action`
+  already cover defer-mode events; a defer-mode auto-accept records
+  `auto-allow` exactly as prompt mode does.
 
 ## Impact
 
-- Code: gptel.el + gptel-request.el (the four patch hunks; upstreamable),
-  gptel-permit.el (defer verdict emission, rule-index capture, stash),
-  gptel-permit-judge.el (defer-mode callback, fall-through re-scan),
-  gptel-permit-analytics.el (latency field), README (mode table).
+- Code: gptel.el (the patch hunks; upstreamable), gptel-permit.el (defer
+  verdict emission, stash gains the FSM), gptel-permit-judge.el (defer-mode
+  callback), README (mode table).
 - Hook pipeline: one new hook-result key (`:defer`), additive; hooks without
   defer support are unaffected. The permit hook uses `:defer` only in defer
   mode.
-- Dependencies: **requires `judge-async-action`** (its action/async/analytic
-  machinery is the base; only the parking mechanics change). Feature-detected
-  at runtime; unpatched gptel degrades to `prompt` mode. The gptel patch must
-  land (and be verified in a live session) before this change archives.
+- Dependencies: **requires `judge-async-action`** (its action/async/
+  analytic machinery is the base; only the parking mechanics change).
+  Feature-detected at runtime; unpatched gptel degrades to `prompt` mode.
+  The gptel patch must land (and be verified in a live session) before
+  this change archives.

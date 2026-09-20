@@ -4,12 +4,14 @@
 - [ ] 1.2 Use the helper in `gptel-permit--inside-protected-dirs-p`; add `./.git` to the `gptel-permit-protected-dirs` default and document `./` semantics in its docstring
 - [ ] 1.3 ERT tests: `./` resolution with/without project, non-prefixed `~/` unchanged, predicate match on project-root-relative `.git` path
 
-## 2. Backend registry and bwrap rename
+## 2. CLOS backend contract, registry, and bwrap rename
 
-- [ ] 2.1 Define `gptel-permit-sandbox-backends` defcustom (alist `SYMBOL → (:available-p FN :wrap FN)`, security-relevant docstring); ship `bwrap` and `srt` entries wrapping the existing `--sandbox-wrap-bwrap`/`--sandbox-wrap-srt` functions
-- [ ] 2.2 Rename `'builtin` → `'bwrap` in `gptel-permit-sandbox-backend` (values `auto`/`bwrap`/`srt`; dynamic completion over registry symbols); update all dispatch sites (`--backend-available-p`, `--sandbox-action`) to registry lookups with fail-closed on unknown symbol
-- [ ] 2.3 Implement `gptel-permit--sandbox-resolve-backend` (Linux → bwrap; else first available registered; else nil), memoized, invalidated via the `gptel-permit-sandbox-backends` setter; re-verify `:available-p` per wrap; log the resolved value; fail-closed `(:confirm t)` + message when resolution is nil
-- [ ] 2.4 ERT tests: registry dispatch (stub `:wrap`/`:available-p`), unknown-symbol fail-closed, resolver table (Linux bwrap / non-Linux first-available / none), memoization invalidation
+- [ ] 2.1 Define the base class `gptel-permit-sandbox-backend` and the two generics `gptel-permit-sandbox-available-p`, `gptel-permit-sandbox-wrap` in `gptel-permit-sandbox.el` (docstrings mark the contract security-relevant); define the registry defcustom `gptel-permit-sandbox-backends` (alist symbol → class symbol) with a setter that invalidates the memoized `auto` resolution
+- [ ] 2.2 Extract `gptel-permit-sandbox-bwrap.el`: class `gptel-permit-sandbox-backend-bwrap`, `available-p` (gnu/linux + executable-find), `wrap` moved verbatim from `--sandbox-wrap-bwrap`; module appends its registry entry at load
+- [ ] 2.3 Extract `gptel-permit-sandbox-srt.el`: class `gptel-permit-sandbox-backend-srt`, `available-p` (executable-find "srt"), `wrap` + settings-file generation moved verbatim; module appends its registry entry at load
+- [ ] 2.4 Rename `'builtin` → `'bwrap` in `gptel-permit-sandbox-backend` (values `auto`/`bwrap`/`srt`; dynamic completion over registry symbols); update all dispatch sites (`--backend-available-p`, `--sandbox-action`) to registry lookups (instantiate + cache one stateless instance per class) with fail-closed on unknown symbol; drop all backend-specific argv construction from the core
+- [ ] 2.5 Implement `gptel-permit--sandbox-resolve-backend` (Linux → bwrap; else first available registered; else nil), memoized, invalidated via the registry setter; re-verify `available-p` per wrap; log the resolved value; fail-closed `(:confirm t)` + message when resolution is nil
+- [ ] 2.6 ERT tests: registry dispatch (stub subclass + methods), unknown-symbol fail-closed, resolver table (Linux bwrap / non-Linux first-available / none), memoization invalidation
 
 ## 3. Tool adapters
 
@@ -35,6 +37,7 @@
 
 ## 7. Docs and verification
 
-- [ ] 7.1 README: backend registry authoring guide (with the security caveat), `./` protected-dirs semantics + migration note (`'builtin` → `'bwrap`; re-add `./.git` if the option was customized), latch + reset semantics, `C-c C-s` key
-- [ ] 7.2 Byte-compile all files, run full ERT suite (`make test`); update tests pinning `'builtin`/old candidate sets
-- [ ] 7.3 Manual pass: bwrap sandbox still contains (write to project OK, `.git` and `~/.ssh` blocked, network off); `C-c C-s` on a live pending call; latch trip via forced boundary failure then reset
+- [ ] 7.1 README: CLOS backend authoring guide (subclass + two methods + add-to-list, with the security caveat and the shipped classes as templates), `./` protected-dirs semantics + migration note (`'builtin` → `'bwrap`; re-add `./.git` if the option was customized), latch + reset semantics, `C-c C-s` key
+- [ ] 7.2 Update AGENTS.org project-structure list with the two new backend files
+- [ ] 7.3 Byte-compile all files, run full ERT suite (`make test`); update tests pinning `'builtin`/old candidate sets
+- [ ] 7.4 Manual pass: bwrap sandbox still contains (write to project OK, `.git` and `~/.ssh` blocked, network off); `C-c C-s` on a live pending call; latch trip via forced boundary failure then reset

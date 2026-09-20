@@ -7,23 +7,23 @@ the returned plist immediately — `:confirm` merged onto the call,
 (`gptel--inject-tool-call` + `gptel--merge-plists`), `:block`/`:result`
 short-circuiting execution. The FSM then leaves TPRE (its handler list ends
 with `gptel--fsm-transition` → TOOL) and `gptel--handle-tool-use`
-(gptel-request.el:1934) executes or queues each unresolved call — deferred
+(gptel-request.el) executes or queues each unresolved call — deferred
 verdicts simply do not exist.
 
 Two structural facts make a small patch sufficient:
 
-- `gptel--process-tool-call` (gptel-request.el:1908) counts
-  `remaining` as calls without `:result`; a deferred call never gets
-  `:result` while parked, so the final FSM transition (TOOL → TRET → WAIT,
-  the LLM round-trip) is *naturally* suppressed — no change needed there.
+- `gptel--process-tool-call` counts `remaining` as calls without `:result`;
+  a deferred call never gets `:result` while parked, so the final FSM
+  transition (TOOL → TRET → WAIT, the LLM round-trip) is *naturally*
+  suppressed — no change needed there.
 - TPRE and TOOL are explicitly re-entrant by design (their docstrings say
   "this function might run many times, so only act on the remaining tool
   calls"), and the tool-use pass filters on `:result`, so an undeferred
   call is picked up cleanly on the next TOOL entry.
 
-`judge-async-action` (implemented just before this) provides the async
-judge request, the stash/watchdog, the pack gating analysis, and the
-analytics event types; this change only replaces the parking mechanics.
+`judge-async-action` (implemented first) provides the judge forms, the
+verdict→action mapping, the async request + watchdog + stash, and the
+analytics events; this change only replaces the parking mechanics.
 
 ## Goals / Non-Goals
 
@@ -32,15 +32,15 @@ analytics event types; this change only replaces the parking mechanics.
   freeze.
 - An upstreamable gptel patch — general (any hook may defer), minimal
   (~3 edit sites + 1 helper), no new FSM states.
-- Preserved rule semantics: UNSAFE/failure falls through to later rules,
-  unlike `prompt` mode's human-fallback.
-- Feature detection: unpatched gptel silently degrades to `prompt` mode.
+- Identical resolution semantics across all modes: the verdict→action
+  mapping is mode-independent; only *where* the resolution lands differs.
+- Feature detection: unpatched gptel degrades to `prompt` mode.
 
 **Non-Goals:**
 - Changing the `prompt`-mode mechanics (both modes coexist behind
   `gptel-permit-judge-async`).
-- Making `:defer` available to the condition form (`gptel-permit-judge-safe-p`
-  stays synchronous; conditions cannot defer).
+- Making `:defer` available to the condition form
+  (`gptel-permit-judge-safe-p` stays synchronous; conditions cannot defer).
 - Upstreaming the patch to gptel mainline (out of our repo's scope; the
   patch is prepared upstreamable, delivery is a separate decision).
 
@@ -69,56 +69,55 @@ analytics event types; this change only replaces the parking mechanics.
    (`gptel--update-tool-call`, `gptel--handle-tool-use`,
    `gptel--update-tool-ask`) then execute the call or show the prompt for
    it, exactly as they would have right after the first TPRE pass.
-   *Consequence:* validation ran once on the original args in the first
-   pass — same as the sync path today, where the post-hook merge also goes
-   straight to TOOL.
 
 3. **The hook plist gains `:fsm`.** Permit's callback needs the FSM to call
    the resolver; gptel passes it in `hook-func-args`
-   (`(:buffer … :backend … :model … :fsm fsm)`). Additive; hooks that ignore
-   it are unaffected. Feature detection: `(fboundp 'gptel--resolve-tool-call)`.
+   (`(:buffer … :backend … :model … :fsm fsm)`). Additive; hooks that
+   ignore it are unaffected. Feature detection:
+   `(fboundp 'gptel--resolve-tool-call)`.
 
-4. **SAFE resolves the paired action's verdict; UNSAFE/failure re-scans
-   later rules.** The stash holds the rule index. On UNSAFE/failure/timeout
-   the callback re-runs the rule scan from `rule-index+1` — synchronous, on
-   the callback thread, against *current* rule state — and resolves with
-   the first match's verdict; no later match resolves with an empty verdict
-   (gptel's own `:confirm` defaults decide — the same as a nil hook verdict
-   today). SAFE resolves with the paired action (`allow` →
-   `(:confirm nil)`; `sandbox` → `(:confirm nil :args REWRITTEN)` via the
-   adapter registry).
-   *Why re-scan is sound here (and wasn't in prompt mode):* the call is
-   *not* on a prompt — no human is waiting to be contradicted; the resolver
-   is the only actor, so re-deriving the verdict from live rules is both
-   safe and semantically identical to what sync mode did inline. The
-   stale-snapshot concern (rules changing between defer and resolve) cuts
-   the same way sync mode's own race between hook-run and execution does;
-   current-state wins.
+4. **Resolution is the plain verdict→action mapping — no rule re-scan.**
+   The judge rule matched and owns the call in every mode; the callback
+   resolves with the mapping's verdict: SAFE → ON-SAFE (allow →
+   `(:confirm nil)`; sandbox → `(:confirm nil :args REWRITTEN)` via the
+   adapter registry; ask → `(:confirm t)`), UNSAFE → ON-UNSAFE (deny →
+   `(:block …)` with the rationale), failure → `(:confirm t)`, audit-sampled
+   → `(:confirm t)`. An `ask` or failure resolution surfaces the prompt at
+   that point — the prompt appears exactly when a human is needed.
+   *This replaces the earlier design's rule-index continuation:* with the
+   two-slot judge grammar, the ON-UNSAFE slot already expresses the
+   negative resolution, so re-scanning later rules would contradict the
+   action-form semantics ("the judge sits in the action part; it does not
+   determine rule applicability"). The stash needs no rule index, and the
+   callback is a pure function of `(verdict on-safe on-unsafe)`.
 
 5. **Pack gating is unnecessary in defer mode.** Deferred calls never reach
    the pending-calls list, so a deferred call cannot smuggle a pack-mate
-   into auto-acceptance: each deferred call is resolved *individually* by
-   its own verdict, and non-judged calls in the same round prompt/run
-   independently of it. The all-or-nothing `prompt`-mode gating stays as-is
-   for `prompt` mode only.
+   into a programmatic resolution: each deferred call is resolved
+   *individually* by its own verdict, and non-judged calls in the same
+   round prompt/run independently of it. The all-or-nothing uniformity
+   gating stays in `prompt` mode only (it exists because gptel's prompt is
+   pack-granular).
    *Consequence for multi-call rounds:* some calls may prompt while a
-   sibling call is deferred — the prompt shows only the non-deferred calls,
-   and the deferred one executes when its verdict lands, even while the
-   user still stares at the prompt for the others. `handle-tool-use`'s
+   sibling call is deferred — the prompt shows only the non-deferred
+   calls, and the deferred one executes when its verdict lands, even while
+   the user still stares at the prompt for the others. `handle-tool-use`'s
    re-entrancy ("only act on the remaining") makes this safe: the deferred
    call joins the next TOOL pass via the resolver.
 
 6. **Watchdog resolves, not aborts.** The per-stash timer
    (`gptel-permit-judge-timeout`) calls the same resolution path with the
-   `timeout` failure class (fall-through re-scan). The gptel request itself
-   is left alone (abort machinery is heavier than needed; a stray late
-   response hits the already-resolved guard and is discarded + logged).
+   `timeout` failure class (→ the manual-confirmation verdict, surfacing
+   the prompt). The gptel request itself is left alone (abort machinery is
+   heavier than needed; a stray late response hits the already-resolved
+   guard and is discarded + logged).
 
 7. **Mode selection: `auto` default.** `gptel-permit-judge-async` becomes
    `(choice (const auto) (const defer) (const prompt) (const nil))`,
    default `auto`: `defer` when `(fboundp 'gptel--resolve-tool-call)`,
-   else `prompt`. Explicit values win; `nil` keeps sync. A one-time log
-   line announces the resolved mode at first judge use.
+   else `prompt`. Explicit values win; `nil` keeps sync; the old boolean
+   `t` reads as `prompt` for compatibility. A one-time log line announces
+   the resolved mode at first judge use.
 
 ## Risks / Trade-offs
 
@@ -135,10 +134,10 @@ analytics event types; this change only replaces the parking mechanics.
   (prompt shows 2 of 3 calls; the third runs "by itself" later)] → The
   status line already shows per-tool activity; defer mode's premise is
   that judge-gated calls are trusted auto-run calls; documented in README.
-- [Callback runs `with-current-buffer` into the request buffer from a
-  timer/process context] → All resolution happens on the main thread via
-  gptel's callback machinery (same as `prompt` mode); timer callbacks are
-  main-thread too in Emacs — no threading concerns.
+- [Callback runs from a timer/process context] → All resolution happens on
+  the main thread (gptel's callback machinery and Emacs timers are
+  main-thread); `with-current-buffer` into the request buffer as in
+  prompt mode — no threading concerns.
 
 ## Migration Plan
 
@@ -147,7 +146,7 @@ analytics event types; this change only replaces the parking mechanics.
 2. Implement permit-side defer mode behind `gptel-permit-judge-async =
    'defer`; keep `prompt` and sync modes intact.
 3. Flip the default to `auto`; existing `t`/`nil` users of the boolean are
-   unaffected (`t` reads as `prompt` for backwards compatibility).
+   unaffected (`t` reads as `prompt`).
 Rollback: set the defcustom to `prompt`; the gptel patch is inert without
 permit using `:defer`.
 
