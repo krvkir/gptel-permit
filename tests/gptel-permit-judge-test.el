@@ -3,6 +3,10 @@
 (require 'ert)
 (require 'gptel-permit)
 (require 'gptel-permit-judge)
+(require 'gptel-anthropic)
+(require 'gptel-openai)
+(require 'gptel-gemini)
+(require 'gptel-ollama)
 
 ;; -------------------------------------------------------------------
 ;; Verdict parser (pure)
@@ -68,13 +72,39 @@ backend name resolves without needing real credentials."
               (lambda (_name) 'fake-judge-backend)))
      ,@body))
 
+(defmacro gptel-permit-judge-test--with-silent-request (&rest body)
+  "Run BODY with `gptel-request' stubbed to never deliver a response."
+  `(cl-letf (((symbol-function 'gptel-request) (lambda (&rest _) nil))
+             ((symbol-function 'gptel-get-backend)
+              (lambda (_name) 'fake-judge-backend)))
+     ,@body))
+
+(defun gptel-permit-judge-test--clear-log ()
+  "Erase the `*gptel-permit-log*' buffer."
+  (with-current-buffer (get-buffer-create "*gptel-permit-log*")
+    (erase-buffer)))
+
+(defun gptel-permit-judge-test--log-string ()
+  "Return the current contents of the `*gptel-permit-log*' buffer."
+  (with-current-buffer (get-buffer-create "*gptel-permit-log*")
+    (buffer-string)))
+
 (ert-deftest gptel-permit-judge-sync-safe ()
   (gptel-permit-judge-test--with-request "SAFE\nok"
-    (should (equal (gptel-permit--judge-request-sync "p") "SAFE\nok"))))
+    (should (equal (gptel-permit--judge-request-sync "p")
+                   '(:class ok :response "SAFE\nok")))))
 
-(ert-deftest gptel-permit-judge-sync-nil-on-nil-response ()
+(ert-deftest gptel-permit-judge-sync-nil-response-is-request-fail ()
   (gptel-permit-judge-test--with-request nil
-    (should (null (gptel-permit--judge-request-sync "p")))))
+    (should (equal (gptel-permit--judge-request-sync "p")
+                   '(:class request-fail :response nil)))))
+
+(ert-deftest gptel-permit-judge-sync-timeout ()
+  (let ((gptel-permit-judge-backend "stub")
+        (gptel-permit-judge-timeout 0))
+    (gptel-permit-judge-test--with-silent-request
+      (should (equal (gptel-permit--judge-request-sync "p")
+                     '(:class timeout :response nil))))))
 
 ;; -------------------------------------------------------------------
 ;; gptel-permit-judge-safe-p (the condition)
@@ -86,6 +116,7 @@ backend name resolves without needing real credentials."
     (gptel-permit-judge-test--with-request "SAFE\nfine"
       (should (gptel-permit-judge-safe-p
                "ls" (list :name "Bash" :args '(:command "ls") :checked-arg :command)))
+      (should (eq gptel-permit--last-judge-verdict 'safe))
       (should (equal gptel-permit--last-judge-rationale "fine")))))
 
 (ert-deftest gptel-permit-judge-safe-p-returns-nil-on-unsafe ()
@@ -93,22 +124,164 @@ backend name resolves without needing real credentials."
     (gptel-permit-judge-test--with-request "UNSAFE\ntouches /etc"
       (should (null (gptel-permit-judge-safe-p
                      "rm -rf /etc" (list :name "Bash" :args '(:command "rm -rf /etc")))))
+      (should (eq gptel-permit--last-judge-verdict 'unsafe))
       (should (equal gptel-permit--last-judge-rationale "touches /etc")))))
 
 (ert-deftest gptel-permit-judge-safe-p-nil-when-backend-unconfigured ()
   (let ((gptel-permit-judge-backend nil))
     (gptel-permit-judge-test--with-request "SAFE\n"
-      (should (null (gptel-permit-judge-safe-p "ls" (list :name "Bash" :args '(:command "ls"))))))))
+      (should (null (gptel-permit-judge-safe-p "ls" (list :name "Bash" :args '(:command "ls")))))
+      (should (null gptel-permit--last-judge-verdict)))))
 
 (ert-deftest gptel-permit-judge-safe-p-nil-on-unparseable ()
   (let ((gptel-permit-judge-backend "stub"))
     (gptel-permit-judge-test--with-request "maybe"
       (should (null (gptel-permit-judge-safe-p "ls" (list :name "Bash" :args '(:command "ls"))))))))
 
-(ert-deftest gptel-permit-judge-safe-p-nil-on-request-error-response ()
-  (let ((gptel-permit-judge-backend "stub"))
+(ert-deftest gptel-permit-judge-safe-p-parse-fail-records-class ()
+  "An unparseable response records `parse-fail' with the raw text."
+  (let ((gptel-permit-judge-backend "stub")
+        (gptel-permit-log-enabled t))
+    (gptel-permit-judge-test--clear-log)
+    (gptel-permit-judge-test--with-request "maybe it is fine"
+      (should (null (gptel-permit-judge-safe-p
+                     "ls" (list :name "Bash" :args '(:command "ls")))))
+      (should (eq gptel-permit--last-judge-verdict 'parse-fail))
+      (should (equal gptel-permit--last-judge-rationale "maybe it is fine"))
+      (should (string-match-p "Judge response unparseable: maybe it is fine"
+                              (gptel-permit-judge-test--log-string))))))
+
+(ert-deftest gptel-permit-judge-safe-p-timeout-records-class ()
+  "A request that outlives the timeout records `timeout' and logs it."
+  (let ((gptel-permit-judge-backend "stub")
+        (gptel-permit-judge-timeout 0)
+        (gptel-permit-log-enabled t))
+    (gptel-permit-judge-test--clear-log)
+    (gptel-permit-judge-test--with-silent-request
+      (should (null (gptel-permit-judge-safe-p
+                     "ls" (list :name "Bash" :args '(:command "ls")))))
+      (should (eq gptel-permit--last-judge-verdict 'timeout))
+      (should (null gptel-permit--last-judge-rationale))
+      (should (string-match-p "Judge timeout after 0s"
+                              (gptel-permit-judge-test--log-string))))))
+
+(ert-deftest gptel-permit-judge-safe-p-request-fail-on-unknown-backend ()
+  "An unknown backend name records `request-fail' and logs the error."
+  (let ((gptel-permit-judge-backend "gptel-permit-no-such-backend")
+        (gptel-permit-log-enabled t))
+    (gptel-permit-judge-test--clear-log)
+    (cl-letf (((symbol-function 'gptel-request) (lambda (&rest _) nil)))
+      (should (null (gptel-permit-judge-safe-p
+                     "ls" (list :name "Bash" :args '(:command "ls")))))
+      (should (eq gptel-permit--last-judge-verdict 'request-fail))
+      (should (string-match-p "Judge request failed:"
+                              (gptel-permit-judge-test--log-string))))))
+
+(ert-deftest gptel-permit-judge-safe-p-request-fail-on-nil-response ()
+  "A failed request delivering no response records `request-fail'."
+  (let ((gptel-permit-judge-backend "stub")
+        (gptel-permit-log-enabled t))
+    (gptel-permit-judge-test--clear-log)
     (gptel-permit-judge-test--with-request nil
-      (should (null (gptel-permit-judge-safe-p "ls" (list :name "Bash" :args '(:command "ls"))))))))
+      (should (null (gptel-permit-judge-safe-p
+                     "ls" (list :name "Bash" :args '(:command "ls")))))
+      (should (eq gptel-permit--last-judge-verdict 'request-fail))
+      (should (null gptel-permit--last-judge-rationale))
+      (should (string-match-p "Judge request failed: no response"
+                              (gptel-permit-judge-test--log-string))))))
+
+(ert-deftest gptel-permit-judge-evaluate-interrupted-maps-to-timeout ()
+  "C-g interruption is recorded as the `timeout' failure class."
+  (should (eq (gptel-permit--judge-evaluate
+               '(:class interrupted :response nil))
+              'timeout))
+  (should (null gptel-permit--last-judge-rationale)))
+
+;; -------------------------------------------------------------------
+;; Judge request tuning (gptel-permit-judge-request-params)
+;; -------------------------------------------------------------------
+
+(defvar gptel-permit-judge-test--captured-params :unset
+  "Params seen by the stubbed `gptel-request' in the current test.")
+
+(defmacro gptel-permit-judge-test--with-capture (backend &rest body)
+  "Run BODY with `gptel-request' stubbed to capture request params.
+BACKEND is what the stubbed `gptel-get-backend' returns; the captured
+value is in `gptel-permit-judge-test--captured-params'."
+  `(let ((gptel-permit-judge-test--captured-params :unset))
+     (cl-letf (((symbol-function 'gptel-request)
+                (lambda (&rest _)
+                  (setq gptel-permit-judge-test--captured-params
+                        gptel--request-params)
+                  nil))
+               ((symbol-function 'gptel-get-backend)
+                (lambda (_name) ,backend)))
+       ,@body)))
+
+(ert-deftest gptel-permit-judge-thinking-off-params-table ()
+  "Thinking is disabled per backend struct type."
+  (should (equal (gptel-permit--judge-thinking-off-params
+                  (gptel--make-anthropic :name "a"))
+                 '(:thinking (:type "disabled"))))
+  (should (equal (gptel-permit--judge-thinking-off-params
+                  (gptel--make-openai :name "o"))
+                 '(:reasoning_effort "minimal")))
+  (should (equal (gptel-permit--judge-thinking-off-params
+                  (gptel--make-gemini :name "g"))
+                 '(:generationConfig (:thinkingConfig (:thinkingBudget 0)))))
+  (should (equal (gptel-permit--judge-thinking-off-params
+                  (gptel--make-ollama :name "l"))
+                 '(:think :json-false))))
+
+(ert-deftest gptel-permit-judge-thinking-off-unknown-backend ()
+  "Unrecognized backends (symbols, plain structs, nil) derive nil."
+  (should (null (gptel-permit--judge-thinking-off-params 'fake-judge-backend)))
+  (should (null (gptel-permit--judge-thinking-off-params
+                 (gptel--make-backend :name "third-party"))))
+  (should (null (gptel-permit--judge-thinking-off-params nil))))
+
+(ert-deftest gptel-permit-judge-user-request-params-win ()
+  "A non-nil `gptel-permit-judge-request-params' overrides the derived default."
+  (let ((gptel-permit-judge-request-params '(:reasoning_effort "low"))
+        (gptel-permit-judge-backend "stub")
+        (gptel-permit-judge-timeout 0)
+        (gptel-permit-log-enabled t))
+    (gptel-permit-judge-test--clear-log)
+    (gptel-permit-judge-test--with-capture (gptel--make-openai :name "stub")
+      (gptel-permit--judge-request-sync "p")
+      (should (equal gptel-permit-judge-test--captured-params
+                     '(:reasoning_effort "low")))
+      (should (string-match-p "Judge request params: (:reasoning_effort \"low\")"
+                              (gptel-permit-judge-test--log-string))))))
+
+(ert-deftest gptel-permit-judge-derives-thinking-off-by-default ()
+  "With nil user params the judge derives and logs thinking-off params."
+  (let ((gptel-permit-judge-request-params nil)
+        (gptel-permit-judge-backend "stub")
+        (gptel-permit-judge-timeout 0)
+        (gptel-permit-log-enabled t))
+    (gptel-permit-judge-test--clear-log)
+    (gptel-permit-judge-test--with-capture (gptel--make-anthropic :name "stub")
+      (gptel-permit--judge-request-sync "p")
+      (should (equal gptel-permit-judge-test--captured-params
+                     '(:thinking (:type "disabled"))))
+      (should (string-match-p
+               "Judge request params: (:thinking (:type \"disabled\"))"
+               (gptel-permit-judge-test--log-string))))))
+
+(ert-deftest gptel-permit-judge-request-params-empty-list-is-nil ()
+  "An \"explicitly empty\" plist is nil in Emacs Lisp, so it derives.
+'() and nil are the same object: there is no distinguishable
+empty-list state, and the thinking-off default applies.  To
+suppress injection entirely, set a non-nil plist re-enabling
+what you want, or use an unrecognized backend (nil derivation)."
+  (let ((gptel-permit-judge-request-params '())
+        (gptel-permit-judge-backend "stub")
+        (gptel-permit-judge-timeout 0))
+    (gptel-permit-judge-test--with-capture (gptel--make-ollama :name "stub")
+      (gptel-permit--judge-request-sync "p")
+      (should (equal gptel-permit-judge-test--captured-params
+                     '(:think :json-false))))))
 
 ;; -------------------------------------------------------------------
 ;; Integration: judge as a rule condition

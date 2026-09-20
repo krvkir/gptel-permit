@@ -311,6 +311,97 @@ srt backend ships documented-but-untested.
 - Boundary-error detection (for the retry counter) matches common OS error
   strings in tool results and is heuristic.
 
+* LLM Judge (opt-in)
+
+=gptel-permit-judge.el= adds an LLM-as-a-judge rule condition: a small
+model classifies a grey-zone tool call (typically a =Bash= command) as
+obviously safe or not. The judge is /deny-only/: a =SAFE= verdict makes
+the enclosing rule match, everything else (including a failed or
+unparseable judge) falls through to the next rule. See the
+[[id:7a2c1d84-0f6e-4a1b-9d3b-5e8f10a2b3c4][Judge-gated sandbox]] example for the recommended
+combination with the =sandbox= action.
+
+#+begin_src elisp
+(use-package gptel-permit-judge
+  :after gptel-permit
+  :custom
+  (gptel-permit-judge-backend "Ollama")    ; nil disables the judge
+  (gptel-permit-judge-model "qwen3:4b"))
+#+end_src
+
+Other options: =gptel-permit-judge-timeout= (seconds to wait, default
+15), =gptel-permit-judge-policy= (extra prose appended to the judge's
+fixed security preamble) and =gptel-permit-judge-history-entries=
+(recent conversation entries to include in the judge prompt, default 0).
+
+** Keeping the judge fast
+
+Judge latency is dominated by model thinking: a model asked to "think"
+before a one-line verdict wastes seconds on every judged call. When
+=gptel-permit-judge-request-params= is nil (the default), the judge
+derives thinking-off request parameters from the judge backend's type
+and let-binds them as gptel's =gptel--request-params= around its
+request, so they are merged into the request body:
+
+#+begin_src elisp
+;; Derived by default when gptel-permit-judge-request-params is nil:
+;;   Anthropic: (:thinking (:type "disabled"))
+;;   OpenAI:    (:reasoning_effort "minimal")
+;;   Gemini:    (:generationConfig (:thinkingConfig (:thinkingBudget 0)))
+;;   Ollama:    (:think :json-false)
+;; Unrecognized backends (incl. OpenAI Responses): nothing injected.
+#+end_src
+
+To pin the judge request body yourself, set
+=gptel-permit-judge-request-params= to a plist; a non-nil value always
+wins over the derived default. Copy-paste starting points:
+
+#+begin_src elisp
+;; Anthropic judge: thinking off, deterministic sampling:
+(setq gptel-permit-judge-request-params
+      '(:thinking (:type "disabled") :temperature 0.0))
+;; OpenAI (Completions API) judge: low reasoning effort:
+(setq gptel-permit-judge-request-params '(:reasoning_effort "low"))
+;; Gemini judge: small thinking budget instead of none:
+(setq gptel-permit-judge-request-params
+      '(:generationConfig (:thinkingConfig (:thinkingBudget 512))))
+;; Ollama judge that keeps thinking on (slow, but thorough):
+(setq gptel-permit-judge-request-params '(:think t))
+#+end_src
+
+Note: gptel's merge is shallow, so a =:generationConfig= here replaces
+the one gptel builds itself (temperature, max tokens). Judge requests
+are bare, so this clobbering is safe for them. An empty plist is
+indistinguishable from nil in Emacs Lisp — there is no separate
+"empty" state; to suppress the derived thinking-off params, set a
+non-nil plist re-enabling what you want (e.g. =(:think t)= on Ollama).
+
+** Judge failure classes and the log
+
+Every judge outcome is distinguishable in the =*gptel-permit-log*=
+buffer (enable it via =gptel-permit-log-enabled=):
+
+- =Judge verdict: safe rationale: …= / =Judge verdict: unsafe rationale: …= ::
+  an evaluated verdict; the rule matches only on =safe=.
+- =Judge response unparseable: …= ::
+  the backend responded, but the first line was neither =SAFE= nor
+  =UNSAFE= — often a thinking model; the truncated raw response follows.
+- =Judge request failed: …= ::
+  the request itself failed: unknown backend name, HTTP error, or no
+  response at all.
+- =Judge timeout after Ns= ::
+  =gptel-permit-judge-timeout= elapsed, or the wait was interrupted
+  with =C-g=.
+
+Older versions logged every failure as one opaque =Judge verdict: FAIL
+rationale:= line with the raw response discarded. Now each judge run
+records a verdict symbol in =gptel-permit--last-judge-verdict= — one of
+=safe=, =unsafe=, =parse-fail=, =request-fail= or =timeout= (=nil=
+when the judge did not run) — which the analytics =judge-verdict=
+field carries verbatim, so a genuine =unsafe= is never confused with a
+judge that broke. All failure classes remain deny-only: the enclosing
+rule does not match and evaluation falls through.
+
 * Local Analytics (opt-in)
 
 To know whether the permission layer is actually reducing prompt fatigue
@@ -329,7 +420,11 @@ correlation id, a timestamp and a type:
   arguments), written when the permission hook evaluates the call.
 - =rule-match=: which rule matched and its action.
 - =verdict=: the hook verdict, including the judge's model, verdict and
-  rationale when the LLM judge was involved in the decision.
+  rationale when the LLM judge was involved in the decision. The
+  =judge-verdict= field is one of =safe=, =unsafe=, =parse-fail=,
+  =request-fail= or =timeout= — the failure classes distinguish "the
+  judge said no" from "the judge broke" (unparseable response, failed
+  request, or timeout).
 - =confirm=: a manual prompt was shown.
 - =decision=: the user's resolution (allow / cancel / steer) together with
   the milliseconds spent on the prompt. A cancel is recorded as an event,

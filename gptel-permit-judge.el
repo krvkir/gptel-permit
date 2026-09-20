@@ -63,14 +63,54 @@ last N entries from the tool call's buffer are included, each truncated."
   :type 'integer
   :group 'gptel-permit-judge)
 
+(defcustom gptel-permit-judge-request-params nil
+  "Plist of extra request parameters for judge requests, or nil.
+The effective plist is let-bound as gptel's `gptel--request-params'
+around the judge request; gptel merges it into the request body with
+precedence: gptel's request defaults < these params < the backend's
+`:request-params' < the model's `:request-params'.  The effective
+value is logged via `gptel-permit--log' on every judge request.
+
+When nil (the default), thinking-off parameters are derived from the
+judge backend's type (see `gptel-permit--judge-thinking-off-params'):
+Anthropic `(:thinking (:type \"disabled\"))', OpenAI
+`(:reasoning_effort \"minimal\")', Gemini `(:generationConfig
+(:thinkingConfig (:thinkingBudget 0)))', Ollama `(:think :json-false)';
+unrecognized backends derive nil (no injection).  Note that an empty
+plist is indistinguishable from nil in Emacs Lisp, so there is no
+separate \"empty\" state: set this to a non-nil plist to override the
+derived default, e.g. keep a thinking judge on Anthropic with
+`(:thinking (:type \"enabled\" :budget_tokens 1024))'.
+
+Caveat (Gemini): gptel's merge is shallow, so a `:generationConfig'
+here replaces any `:generationConfig' gptel builds itself (temperature,
+max tokens).  Judge requests are bare, so this clobbering is safe; do
+not use this plist to carry unrelated generation settings."
+  :type '(choice (const :tag "Derive thinking-off params per backend" nil)
+                 (plist :tag "Fixed plist of request parameters"
+                        :key-type symbol :value-type sexp))
+  :group 'gptel-permit-judge)
+
+
 (defvar-local gptel-permit--last-judge-rationale nil
   "Rationale from the most recent judge verdict in this buffer.
-Set by `gptel-permit-judge-safe-p'; intended for audit/analytics.")
+Set by `gptel-permit-judge-safe-p'; intended for audit/analytics.
+For an evaluated verdict (`safe' or `unsafe') this is the judge's own
+rationale line, or \"\" when the response carried none.  For the
+failure class `parse-fail' this holds the truncated raw judge
+response (the response the judge produced but could not be parsed);
+for `request-fail' and `timeout' it is nil — no response arrived.")
 
 (defvar-local gptel-permit--last-judge-verdict nil
-  "Verdict symbol (`safe' or `unsafe') from the most recent judge run
-in this buffer.  Set by `gptel-permit-judge-safe-p'; intended for
-audit/analytics.  Reset per tool call by `gptel-permit--reset-judge-state'.")
+  "Verdict symbol from the most recent judge run in this buffer.
+One of `safe' or `unsafe' (an evaluated judge verdict), one of the
+failure classes `parse-fail' (response arrived but its first line was
+neither SAFE nor UNSAFE), `request-fail' (the request itself failed:
+unknown backend name, HTTP error, no response) or `timeout'
+(`gptel-permit-judge-timeout' elapsed, or the wait was interrupted
+with C-g), or nil when no judge run occurred.  Set by
+`gptel-permit-judge-safe-p'; reset per tool call by
+`gptel-permit--reset-judge-state'; intended for audit/analytics.")
 
 
 (defconst gptel-permit--judge-preamble
@@ -123,34 +163,77 @@ tool call's :buffer (a buffer name string); each message is truncated."
                        )))
    "\n\n"))
 
+(defun gptel-permit--judge-thinking-off-params (backend)
+  "Return a plist disabling model thinking for judge requests to BACKEND.
+Matched on BACKEND's struct type via `type-of', so no backend library
+needs to be loaded to classify it: Anthropic gets thinking disabled,
+OpenAI (Completions) a minimal reasoning effort, Gemini a zero
+thinking budget and Ollama thinking turned off.  Any other backend
+type — including OpenAI Responses, whose `reasoning' grammar differs —
+derives nil: nothing is injected and the model's default applies."
+  (pcase (type-of backend)
+    ('gptel-anthropic '(:thinking (:type "disabled")))
+    ('gptel-openai    '(:reasoning_effort "minimal"))
+    ('gptel-gemini    '(:generationConfig
+                       (:thinkingConfig (:thinkingBudget 0))))
+    ('gptel-ollama    '(:think :json-false))
+    (_ nil)))
+
+
 (defun gptel-permit--judge-request-sync (prompt)
-  "Send PROMPT to the judge backend and return the response string, or nil.
-Blocks up to `gptel-permit-judge-timeout' seconds.  Any failure (unknown
-backend name, request error, timeout, C-g) returns nil.  Errors are caught
-explicitly (including `user-error' from `gptel-get-backend'); the explicit
-(quit) handler plus `with-local-quit' in the body keep C-g interruptible."
+  "Send PROMPT to the judge backend and return the outcome plist.
+The plist carries `:class' — `ok' (the judge responded),
+`request-fail' (the request signaled an error, or gptel reported a
+failure with no response), `timeout' (`gptel-permit-judge-timeout'
+elapsed) or `interrupted' (the user pressed C-g) — and `:response',
+the response string when `:class' is `ok'.  Blocks up to
+`gptel-permit-judge-timeout' seconds.  Every failure class logs its
+own line via `gptel-permit--log': `Judge request failed: …',
+`Judge timeout after Ns' or `Judge interrupted'.  Errors are caught
+explicitly (including `user-error' from `gptel-get-backend'); the
+explicit (quit) handler plus `with-local-quit' in the body keep C-g
+interruptible.  The effective request parameters (see
+`gptel-permit-judge-request-params') are let-bound as
+`gptel--request-params' around the request and logged once."
   (let ((done nil)
-        (resp nil))
+        (resp nil)
+        (status nil))
     (catch 'judge-abort
       (condition-case err
           (with-local-quit
-            (let ((gptel-backend (gptel-get-backend gptel-permit-judge-backend))
-                  (gptel-model gptel-permit-judge-model)
-                  (gptel-use-tools nil)
-                  (gptel-use-context nil)
-                  (gptel-stream nil))
+            (let* ((backend (gptel-get-backend gptel-permit-judge-backend))
+                   (gptel--request-params
+                    (or gptel-permit-judge-request-params
+                        (gptel-permit--judge-thinking-off-params backend)))
+                   (gptel-backend backend)
+                   (gptel-model gptel-permit-judge-model)
+                   (gptel-use-tools nil)
+                   (gptel-use-context nil)
+                   (gptel-stream nil))
+              (gptel-permit--log "Judge request params: %S"
+                                 gptel--request-params)
               (gptel-request prompt
-                :callback (lambda (response _info)
-                            (setq resp (when (stringp response) response))
-                            (setq done t)))
+                :callback (lambda (response info)
+                            (setq resp (when (stringp response) response)
+                                  status (plist-get info :status)
+                                  done t)))
               (let ((deadline (time-add nil gptel-permit-judge-timeout)))
                 (while (and (not done) (time-less-p nil deadline))
                   (accept-process-output nil 0.05)))))
-        (quit (setq resp nil) (throw 'judge-abort nil))
+        (quit (gptel-permit--log "Judge interrupted")
+              (throw 'judge-abort (list :class 'interrupted :response nil)))
         (error
-         (gptel-permit--log "Judge request failed: %s" (error-message-string err))
-         (setq resp nil))))
-    resp))
+         (gptel-permit--log "Judge request failed: %s"
+                            (error-message-string err))
+         (throw 'judge-abort (list :class 'request-fail :response nil))))
+      (cond
+       ((and done (stringp resp)) (list :class 'ok :response resp))
+       (done (gptel-permit--log "Judge request failed: %s"
+                                (or status "no response"))
+             (list :class 'request-fail :response nil))
+       (t (gptel-permit--log "Judge timeout after %ss"
+                             gptel-permit-judge-timeout)
+          (list :class 'timeout :response nil))))))
 
 (defun gptel-permit--judge-parse-verdict (response)
   "Parse RESPONSE into (VERDICT . RATIONALE), or nil if unparseable.
@@ -164,15 +247,51 @@ parses; anything else returns nil."
         ("UNSAFE" (cons 'unsafe (string-trim (mapconcat #'identity (cdr lines) "\n"))))
         (_ nil)))))
 
+(defun gptel-permit--judge-evaluate (result)
+  "Reduce judge request RESULT to a verdict and record it in this buffer.
+RESULT is the outcome plist from `gptel-permit--judge-request-sync'.
+Records the verdict in `gptel-permit--last-judge-verdict' and the
+rationale (or the truncated raw response, for `parse-fail') in
+`gptel-permit--last-judge-rationale' — see their docstrings — logs the
+evaluated verdict, and returns the verdict symbol: `safe' or `unsafe'
+when the response parsed, or a failure class (`parse-fail',
+`request-fail', `timeout').  A C-g interruption is recorded as
+`timeout'; every failure keeps the condition deny-only."
+  (let* ((class (plist-get result :class))
+         (response (plist-get result :response))
+         (parsed (when (eq class 'ok)
+                   (gptel-permit--judge-parse-verdict response)))
+         (verdict (or (car parsed)
+                      (pcase class
+                        ('ok 'parse-fail)
+                        ('timeout 'timeout)
+                        ('interrupted 'timeout)
+                        (_ 'request-fail)))))
+    (setq gptel-permit--last-judge-verdict verdict
+          gptel-permit--last-judge-rationale
+          (pcase verdict
+            ((or 'safe 'unsafe) (or (cdr parsed) ""))
+            ('parse-fail (gptel-permit--truncate-arg (or response "")))
+            (_ nil)))
+    (if parsed
+        (gptel-permit--log "Judge verdict: %s rationale: %s"
+                           verdict gptel-permit--last-judge-rationale)
+      (when (eq verdict 'parse-fail)
+        (gptel-permit--log "Judge response unparseable: %s"
+                           gptel-permit--last-judge-rationale)))
+    verdict))
+
+
 (defun gptel-permit-judge-safe-p (value tool-call)
   "Return non-nil if the judge models VALUE of TOOL-CALL as obviously safe.
 This is a deny-only condition: it never blocks, and every failure path
 (unconfigured backend, request error, timeout, C-g, unparseable output,
 UNSAFE verdict) returns nil so the enclosing rule does not match and
-evaluation falls through to later rules.  On any evaluated verdict the
-judge's verdict symbol and rationale are stored in
-`gptel-permit--last-judge-verdict' and `gptel-permit--last-judge-rationale'
-for audit/analytics."
+evaluation falls through to later rules.  Every judge run records its
+outcome in `gptel-permit--last-judge-verdict' — `safe', `unsafe' or a
+failure class — and the rationale or raw response in
+`gptel-permit--last-judge-rationale'; both are nil when the judge is
+disabled or has not run."
   (setq gptel-permit--last-judge-rationale nil
         gptel-permit--last-judge-verdict nil)
   (if (not gptel-permit-judge-backend)
@@ -180,15 +299,9 @@ for audit/analytics."
         (gptel-permit--log "Judge: disabled (gptel-permit-judge-backend is nil)")
         nil)
     (message "gptel-permit: judging %s call..." (plist-get tool-call :name))
-    (let* ((prompt (gptel-permit--judge-build-prompt value tool-call))
-           (response (gptel-permit--judge-request-sync prompt))
-           (parsed (gptel-permit--judge-parse-verdict response))
-           (verdict (car parsed))
-           (rationale (or (cdr parsed) "")))
-      (setq gptel-permit--last-judge-rationale rationale
-            gptel-permit--last-judge-verdict verdict)
-      (gptel-permit--log "Judge verdict: %s rationale: %s"
-                         (or verdict "FAIL") gptel-permit--last-judge-rationale)
+    (let ((verdict (gptel-permit--judge-evaluate
+                    (gptel-permit--judge-request-sync
+                     (gptel-permit--judge-build-prompt value tool-call)))))
       (message nil)
       (eq verdict 'safe))))
 
