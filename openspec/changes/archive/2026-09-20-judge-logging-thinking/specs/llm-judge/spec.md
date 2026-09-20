@@ -96,7 +96,7 @@ SHALL make the condition return nil so the enclosing rule does not match.
 
 #### Scenario: SAFE verdict matches
 - **WHEN** `gptel-permit-judge-safe-p` is called for a Bash `:command` and the
-  judge request returns "SAFE" as the first line
+  judge request returns a parseable SAFE verdict
 - **THEN** the function returns t and stores the judge's rationale (the
   remainder of the response) in `gptel-permit--last-judge-rationale`.
 
