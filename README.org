@@ -385,6 +385,13 @@ indistinguishable from nil in Emacs Lisp — there is no separate
 "empty" state; to suppress the derived thinking-off params, set a
 non-nil plist re-enabling what you want (e.g. =(:think t)= on Ollama).
 
+If thinking-off parameters backfire — some models ignore them and
+instead start writing their reasoning into the answer, or glue their
+verdict onto a prose line — set =gptel-permit-judge-control-thinking=
+to nil: no thinking-related parameters are derived or injected at
+all, and the judge model runs with its default behavior (your own
+=gptel-permit-judge-request-params=, if set, are still sent verbatim).
+
 The judge request is also isolated from your session's persona: it
 is sent with no system message at all. Without this, =gptel-request=
 inherits the /buffer-local/ =gptel-system-prompt= of the calling gptel
@@ -396,9 +403,15 @@ The judge model sees only its own security preamble.
 
 Some models keep deliberating regardless: Ollama =:cloud= models
 (e.g. =glm-5.3-flash:cloud=) ignore =think: false= and interleave their
-reasoning with the answer text. Verdict parsing tolerates this (see
-the next section); if it cannot find a standalone verdict, the call
-parse-fails and falls through to the next rule.
+reasoning with the answer text — one was observed gluing a closing
+think tag directly between its prose and the verdict, all on one
+line. Verdict parsing tolerates this in two steps (see the next
+section): a closing think tag cuts everything before it, and then
+the divider applies; if no verdict line remains, the call
+parse-fails and falls through to the next rule. If the derived
+parameters make your judge /more/ verbose,
+=gptel-permit-judge-control-thinking= nil turns the request-side
+attempts off entirely.
 
 ** Judge failure classes and the log
 
@@ -408,10 +421,10 @@ buffer (enable it via =gptel-permit-log-enabled=):
 - =Judge verdict: safe rationale: …= / =Judge verdict: unsafe rationale: …= ::
   an evaluated verdict; the rule matches only on =safe=.
 - =Judge response unparseable: …= ::
-  the backend responded, but no line of it (after stripping leaked
-  reasoning blocks) was exactly =SAFE= or =UNSAFE= — often a thinking
-  model that ignored the thinking-off request; the truncated raw
-  response follows.
+  the backend responded, but no line of it was exactly =SAFE= or
+  =UNSAFE= — often a thinking model that ignored the thinking-off
+  request; the full raw response follows (untruncated, to aid
+  debugging).
 - =Judge request failed: …= ::
   the request itself failed: unknown backend name, HTTP error, or no
   response at all.
@@ -428,15 +441,21 @@ field carries verbatim, so a genuine =unsafe= is never confused with a
 judge that broke. All failure classes remain deny-only: the enclosing
 rule does not match and evaluation falls through.
 
-Verdict parsing is strict but reasoning-proof: =​= and
-=​' blocks are stripped first, then the verdict is the
-last line whose entire (trimmed) text is =SAFE= or =UNSAFE=, with the
-rationale taken from the lines after it. An exploratory =UNSAFE= draft
-followed by a =SAFE= conclusion (or vice versa) is treated as
-unparseable rather than guessed, and a verdict word glued into the
-middle of a longer line (a server concatenating thinking and answer
-text without a separator) does not count — both fall through to the
-next rule.
+Verdict parsing runs in two steps. First the closing-tag heuristic:
+when the response contains a closing reasoning tag, everything up to
+and including the last one is dropped — models that stream reasoning
+and glue the closing tag onto the answer line still leave a
+parseable verdict behind. Then the divider applies to what remains:
+the first line whose entire (trimmed) text is exactly =SAFE= or
+=UNSAFE= splits it — everything above is treated as leaked model
+reasoning and dropped, everything below becomes the rationale.
+Verdict words glued into the middle of a longer line (a server
+concatenating thinking and answer text without a separator) do not
+count. An exploratory =UNSAFE= draft followed by a =SAFE= conclusion
+(or vice versa) — standalone verdict words appearing anywhere in the
+remaining text — is treated as unparseable rather than guessed, and
+an unparseable response is stored and logged in full; all of these
+fall through to the next rule.
 
 * Local Analytics (opt-in)
 

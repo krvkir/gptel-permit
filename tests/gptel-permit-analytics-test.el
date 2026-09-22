@@ -183,7 +183,9 @@ sharing one id, with monotonic timestamps."
           gptel-permit-analytics-enabled t)
     (let ((gptel-permit-rules '((:tool "Bash" :action allow)))
           (gptel-permit-global-rules nil))
-      (gptel-permit--apply-rules (list :name "Bash" :args '(:command "ls"))))
+      (cl-letf (((symbol-function 'random)
+                 (lambda (_n) (error "random must not be called"))))
+        (gptel-permit--apply-rules (list :name "Bash" :args '(:command "ls")))))
     ;; All new chain events continue after the pre-existing id 3.
     (should (equal (mapcar (lambda (e)
                              (gptel-permit-analytics-test--field e 'id))

@@ -70,20 +70,21 @@ schema mode once per request.
 The judge prompt SHALL instruct the model to respond with a JSON
 object containing a `verdict` field whose value is "SAFE" or "UNSAFE"
 and a short `rationale` string field. The parser SHALL be dual-layer:
-it SHALL strip leaked reasoning blocks (`​` / `<thinking>`) and one
-surrounding markdown code-fence pair, then first accept a response
-that is a single JSON object with `verdict` exactly "SAFE" or "UNSAFE"
-and a string `rationale` (a `verdict` value outside the enum is a
-rejection, not a text-contract candidate); if the JSON layer fails,
-it SHALL fall back to the text contract — the last line whose entire
-trimmed text is exactly SAFE or UNSAFE, with the text after it as the
-rationale, and unparseable when standalone SAFE and UNSAFE lines both
-appear. A response satisfying neither layer SHALL be unparseable and
-the condition SHALL return nil. The rationale (from the JSON field or
-the text after the verdict line) SHALL be retained
-(`gptel-permit--last-judge-rationale`) for audit consumers, and
-SHALL be truncated via `gptel-permit--truncate-arg` when it is the
-raw response of a parse-fail.
+first, the JSON layer SHALL accept a response that is a single JSON
+object with `verdict` exactly "SAFE" or "UNSAFE" and a string
+`rationale` (a `verdict` value outside the enum is a rejection, not a
+text-contract candidate); one surrounding markdown code-fence pair is
+tolerated. If the JSON layer fails, the text layer SHALL apply the
+divider contract (see `judge-divider-parse`): the first line whose
+entire trimmed text is exactly SAFE or UNSAFE divides the response —
+text above it is dropped as leaked reasoning, text below it is the
+rationale — and the response is unparseable when standalone SAFE and
+UNSAFE lines both appear anywhere in it. A response satisfying
+neither layer SHALL be unparseable and the condition SHALL return
+nil. The rationale (from the JSON field or the text below the
+divider) SHALL be retained (`gptel-permit--last-judge-rationale`) for
+audit consumers, untruncated when it is the raw response of a
+parse-fail.
 
 #### Scenario: JSON verdict parses
 - **WHEN** the judge responds `{"verdict": "SAFE", "rationale": "Only
@@ -141,7 +142,7 @@ return nil so the enclosing rule does not match.
 #### Scenario: Judge failure is fail-closed
 - **WHEN** the judge request errors, times out, is interrupted with
   C-g, or returns a response that satisfies neither the JSON verdict
-  contract nor the text contract (after stripping leaked reasoning
-  blocks)
+  contract nor the divider text contract (no standalone SAFE or
+  UNSAFE line divides it)
 - **THEN** the function returns nil and the failure is logged via
   `gptel-permit--log`.

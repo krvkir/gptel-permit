@@ -1,9 +1,11 @@
 # Design: judge-schema-verdict
 
 ## Context
-The judge parses verdicts out of free text: strip reasoning blocks,
-take the last standalone SAFE/UNSAFE line, reject conflicting
-standalone verdicts (`gptel-permit--judge-parse-verdict`). The live
+The judge parses verdicts out of free text with the divider contract:
+the first standalone SAFE/UNSAFE line splits leaked reasoning from
+the rationale, and conflicting standalone verdicts are rejected
+(`gptel-permit--judge-parse-verdict`; simplified in the
+`judge-divider-parse` change). The live
 pass on `glm-5.3-flash:cloud` showed the cost of a lexical contract —
 a verdict word glued onto a rationale line is unparseable by design —
 and every model quirk risks another parser bandage.
@@ -53,16 +55,17 @@ Structured outputs make the contract structural:
    verdict value. gptel's preprocessing supplies the strictness
    fields.
 
-2. **Dual-layer parsing, JSON first, mode-independent.** Strip
-   reasoning blocks, strip one markdown code-fence pair, then read the
-   whole remaining response as JSON (bind `json-object-type`
+2. **Dual-layer parsing, JSON first, mode-independent.** The JSON
+   layer strips one surrounding markdown code-fence pair, then reads
+   the whole remaining response as JSON (bind `json-object-type`
    appropriately); accept only an object whose `verdict` is exactly
    "SAFE" or "UNSAFE" and whose `rationale` is a string. Client-side
    validation stays even under enforcement — enforcement is a backend
    property, not a guarantee. If the JSON layer fails, run the
-   existing text parser on the same response; prose-wrapped or partial
-   JSON falls through to it. Neither layer succeeds → parse-fail
-   (truncated raw retained, as today). A JSON object whose `verdict`
+   existing divider text parser (see `judge-divider-parse`) on the
+   same response; prose-wrapped or partial JSON falls through to it.
+   Neither layer succeeds → parse-fail (full raw response retained
+   and logged, as today). A JSON object whose `verdict`
    is outside the enum is a *rejection* — the model hedged — not a
    text-fallback candidate.
 

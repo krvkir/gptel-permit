@@ -23,13 +23,13 @@
 
 ## 2. Dual-layer parser (gptel-permit-judge.el)
 - [ ] 2.1 Add pure `gptel-permit--judge-parse-json-verdict`: strip
-      reasoning blocks and one surrounding markdown fence, bind
-      `json-object-type`, `json-read-from-string` the whole response;
+      one surrounding markdown fence, bind `json-object-type`,
+      `json-read-from-string` the whole response;
       accept only `verdict` exactly "SAFE"/"UNSAFE" plus a string
       `rationale`; return `(VERDICT . rationale)` or nil.
 - [ ] 2.2 Make `gptel-permit--judge-parse-verdict` try the JSON layer
-      first and fall back to the existing text parser; neither layer
-      → nil (parse-fail path unchanged: truncated raw response
+      first and fall back to the existing divider text parser; neither
+      layer → nil (parse-fail path unchanged: full raw response
       retained and logged).
 - [ ] 2.3 Update docstrings (`--judge-parse-verdict`,
       `gptel-permit--last-judge-rationale`, request-sync) for the
@@ -43,11 +43,10 @@
 - [ ] 3.2 Gating table: `auto` — local Ollama on, `:cloud`-tagged
       Ollama off, OpenAI on, Gemini on, Anthropic off, unknown off;
       `t` and `nil` override everywhere.
-- [ ] 3.3 Parser table: JSON happy path, fenced JSON, JSON after a
-      leaked reasoning block, rationale string extraction, verdict
-      outside the enum → nil (no text fallback), invalid JSON → text
-      fallback (existing text tests cover the fallback layer), both
-      layers fail → nil.
+- [ ] 3.3 Parser table: JSON happy path, fenced JSON, rationale
+      string extraction, verdict outside the enum → nil (no text
+      fallback), invalid JSON → text fallback (existing divider tests
+      cover the fallback layer), both layers fail → nil.
 - [ ] 3.4 Request keyword test: `:schema` present in captured
       `gptel-request` keys iff the predicate is true (`plist-member`,
       like the `:system nil` test).

@@ -16,22 +16,20 @@
   (should (equal (gptel-permit--judge-parse-verdict "SAFE\nWrites only in project")
                  '(safe . "Writes only in project"))))
 
-(ert-deftest gptel-permit-judge-strip-thinking-removes-blocks ()
-  "Think blocks (ollama and deepseek delimiters) are stripped, lazily."
-  (should (equal (gptel-permit--judge-strip-thinking
-                  "a​Could this be\nUNSAFE\n? No.\n​\nSAFE\nRead-only")
-                 "a\nSAFE\nRead-only"))
-  (should (equal (gptel-permit--judge-strip-thinking
-                  "x<THINKING>y</tHiNkInG>z") "xz"))
-  (should (equal (gptel-permit--judge-strip-thinking "a​b") "a​b")))
-
-
 (ert-deftest gptel-permit-judge-parse-safe-no-rationale ()
   (should (equal (gptel-permit--judge-parse-verdict "SAFE")
                  '(safe . ""))))
 
+(ert-deftest gptel-permit-judge-parse-divider-keeps-text-below-first ()
+  "The divider is the first standalone verdict line; later duplicate
+verdict lines are part of the rationale text below it."
+  (should (equal (gptel-permit--judge-parse-verdict
+                  "SAFE\nPart one.\nSAFE\nPart two.")
+                 '(safe . "Part one.\nSAFE\nPart two."))))
+
+
 (ert-deftest gptel-permit-judge-parse-leaked-deliberation-parses ()
-  "Reasoning before the verdict no longer hides it: last standalone line wins."
+  "Reasoning before the verdict no longer hides it: the first standalone verdict line divides reasoning from rationale."
   (should (equal (gptel-permit--judge-parse-verdict
                   "The user asks me to classify a tool call.\nAnalysis: read-only inside the project.\nSAFE\nRead-only ls inside the project.")
                  '(safe . "Read-only ls inside the project.")))
@@ -44,17 +42,31 @@
   (should (equal (gptel-permit--judge-parse-verdict "UNSAFE\nTouches /etc")
                  '(unsafe . "Touches /etc"))))
 
-(ert-deftest gptel-permit-judge-parse-think-blocks-stripped-before-verdict ()
-  "A verdict drafted inside a think block does not conflict with the final one."
+(ert-deftest gptel-permit-judge-parse-divider-drops-thinking-above ()
+  "Text above the first standalone verdict line is dropped as reasoning;
+a verdict word inside a prose line does not count."
   (should (equal (gptel-permit--judge-parse-verdict
-                  "​Could this be\nUNSAFE\n? No, it is local.\n​\nSAFE\nRead-only")
-                 '(safe . "Read-only"))))
+                  "Analyzing the command.\nThis seems SAFE to me in prose.\nSAFE\nRead-only ls in project.")
+                 '(safe . "Read-only ls in project."))))
 
 
 (ert-deftest gptel-permit-judge-parse-garbage-is-nil ()
   (should (null (gptel-permit--judge-parse-verdict "I think it's fine")))
   (should (null (gptel-permit--judge-parse-verdict "")))
   (should (null (gptel-permit--judge-parse-verdict nil))))
+
+(ert-deftest gptel-permit-judge-parse-reasoning-markers-are-ordinary-text ()
+  "Markers that are not closing think tags — pseudo-blocks, fences,
+an UNCLOSED think block — are ordinary text above the divider; only
+a closing think tag triggers the drop-through heuristic."
+  (should (equal (gptel-permit--judge-parse-verdict
+                  "[[reasoning]]\nLet me consider the blast radius.\n[[/reasoning]]\n\nSAFE\nRead-only inside project.")
+                 '(safe . "Read-only inside project.")))
+  (should (equal (gptel-permit--judge-parse-verdict
+                  (concat "<" "think" ">Still reasoning out loud.\n"
+                          "SAFE\nRead-only inside project."))
+                 '(safe . "Read-only inside project."))))
+
 
 (ert-deftest gptel-permit-judge-parse-glued-verdict-is-not-a-line ()
   "A verdict word glued mid-line (server thinking/content concatenation) does not count."
@@ -68,6 +80,62 @@
                  "Could this be\nUNSAFE\n? No, it stays inside.\nSAFE\nRead-only")))
   (should (null (gptel-permit--judge-parse-verdict
                  "Might be fine.\nSAFE\nActually no.\nUNSAFE\nTouches /etc"))))
+
+(ert-deftest gptel-permit-judge-parse-unclosed-think-draft-conflict-is-unparseable ()
+  "A verdict word drafted as a standalone line inside UNCLOSED leaked
+reasoning conflicts with the conclusion, so the response
+fail-closes: without a closing tag there is no trustworthy
+boundary, and no stripping decides which word was meant."
+  (let ((open (concat "<" "think" ">")))
+    (should (null (gptel-permit--judge-parse-verdict
+                   (concat open "Could this be\nUNSAFE\n? No, it is local.\n\nSAFE\nRead-only"))))
+    (should (null (gptel-permit--judge-parse-verdict
+                   (concat open "\nSAFE\nRead-only draft.\n\nUNSAFE\nTouches /etc"))))))
+
+(ert-deftest gptel-permit-judge-drop-thinking-drops-through-last-closing-tag ()
+  "A closing think tag cuts; the LAST one wins; unclosed stays whole."
+  (let ((close (concat "<" "/think" ">"))
+        (close-long (concat "<" "/thinking" ">"))
+        (open (concat "<" "think" ">")))
+    (should (equal (gptel-permit--judge-drop-thinking
+                    (concat "Reasoning prose." close "SAFE\nReason"))
+                   "SAFE\nReason"))
+    (should (equal (gptel-permit--judge-drop-thinking
+                    (concat "One" close "Two" close "Three"))
+                   "Three"))
+    (should (equal (gptel-permit--judge-drop-thinking
+                    (concat "Pondering" close-long "SAFE\nFine"))
+                   "SAFE\nFine"))
+    (should (equal (gptel-permit--judge-drop-thinking
+                    (concat open "Still reasoning out loud"))
+                   (concat open "Still reasoning out loud")))
+    (should (equal (gptel-permit--judge-drop-thinking "Plain answer")
+                   "Plain answer"))))
+
+(ert-deftest gptel-permit-judge-parse-closing-tag-glued-verdict-parses ()
+  "Observed cloud-model failure shape: deliberation, then a closing
+think tag glued between prose and the verdict on one line.  Dropping
+through the tag leaves a standalone verdict line."
+  (should (equal (gptel-permit--judge-parse-verdict
+                  (concat "Let me analyze the command.\n"
+                          "Read-only ls inside the project.\n"
+                          "Answer: SAFE with short rationale."
+                          "<" "/think" ">" "SAFE\n"
+                          "Read-only project-local operations."))
+                 '(safe . "Read-only project-local operations."))))
+
+(ert-deftest gptel-permit-judge-parse-draft-inside-closed-block-resolves ()
+  "A verdict word drafted inside a CLOSED reasoning block is dropped
+with the block; only the conclusion counts."
+  (let ((close (concat "<" "/think" ">")))
+    (should (equal (gptel-permit--judge-parse-verdict
+                    (concat "Thinking...\nUNSAFE\n" close "\nSAFE\nRead-only"))
+                   '(safe . "Read-only")))
+    (should (equal (gptel-permit--judge-parse-verdict
+                    (concat "Thinking...\nSAFE\n" close "\nUNSAFE\nTouches /etc"))
+                   '(unsafe . "Touches /etc")))))
+
+
 
 
 ;; -------------------------------------------------------------------
@@ -192,8 +260,9 @@ backend name resolves without needing real credentials."
       (should (string-match-p "Judge response unparseable: maybe it is fine"
                               (gptel-permit-judge-test--log-string))))))
 
-(ert-deftest gptel-permit-judge-parse-fail-rationale-is-truncated ()
-  "The raw response stored and logged on parse-fail is truncate-arg sized."
+(ert-deftest gptel-permit-judge-parse-fail-rationale-is-untruncated ()
+  "The raw response stored and logged on parse-fail is kept in full:
+truncation hinders debugging."
   (let* ((gptel-permit-judge-backend "stub")
          (gptel-permit-log-enabled t)
          (raw (make-string 200 ?x)))
@@ -202,10 +271,9 @@ backend name resolves without needing real credentials."
       (should (null (gptel-permit-judge-safe-p
                      "ls" (list :name "Bash" :args '(:command "ls")))))
       (should (eq gptel-permit--last-judge-verdict 'parse-fail))
-      (should (equal gptel-permit--last-judge-rationale
-                     (gptel-permit--truncate-arg raw)))
-      (should (< (length gptel-permit--last-judge-rationale) 70))
-      (should (string-match-p (regexp-quote (gptel-permit--truncate-arg raw))
+      (should (equal gptel-permit--last-judge-rationale raw))
+      (should (= (length gptel-permit--last-judge-rationale) 200))
+      (should (string-match-p (regexp-quote raw)
                               (gptel-permit-judge-test--log-string))))))
 
 
@@ -328,6 +396,32 @@ value is in `gptel-permit-judge-test--captured-params'."
                      '(:reasoning_effort "low")))
       (should (string-match-p "Judge request params: (:reasoning_effort \"low\")"
                               (gptel-permit-judge-test--log-string))))))
+
+(ert-deftest gptel-permit-judge-control-thinking-nil-gates-derivation ()
+  "`gptel-permit-judge-control-thinking' nil: no thinking-related
+parameters are derived or injected.  Explicit request params still
+go through verbatim, and non-nil restores the derived default."
+  (let ((gptel-permit-judge-backend "stub")
+        (gptel-permit-judge-model "qwen3:4b")
+        (gptel-permit-judge-timeout 0)
+        (gptel-permit-log-enabled t))
+    (gptel-permit-judge-test--clear-log)
+    (let ((gptel-permit-judge-control-thinking nil))
+      (gptel-permit-judge-test--with-capture (gptel--make-ollama :name "stub")
+        (gptel-permit--judge-request-sync "p")
+        (should (null gptel-permit-judge-test--captured-params))))
+    (let ((gptel-permit-judge-control-thinking t))
+      (gptel-permit-judge-test--with-capture (gptel--make-ollama :name "stub")
+        (gptel-permit--judge-request-sync "p")
+        (should (equal gptel-permit-judge-test--captured-params
+                       '(:think :json-false)))))
+    (let ((gptel-permit-judge-control-thinking nil)
+          (gptel-permit-judge-request-params '(:think t)))
+      (gptel-permit-judge-test--with-capture (gptel--make-ollama :name "stub")
+        (gptel-permit--judge-request-sync "p")
+        (should (equal gptel-permit-judge-test--captured-params
+                       '(:think t)))))))
+
 
 (ert-deftest gptel-permit-judge-derives-thinking-off-by-default ()
   "With nil user params the judge derives and logs thinking-off params."

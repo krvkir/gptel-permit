@@ -4,7 +4,8 @@
 The judge's verdict contract is its most fragile part because it is
 lexical: verdicts are parsed out of free text, so every model quirk
 becomes a parser bug. The `judge-logging-thinking` live pass needed
-three parser extensions in one evening (reasoning-block stripping,
+three parser extensions in one evening (reasoning-block stripping —
+since replaced by the simpler divider of `judge-divider-parse` —
 last-standalone-line matching, conflict rejection) and still documents
 a hard limitation — a verdict word glued mid-line is unparseable.
 Structured outputs remove the problem class in the transport: with an
@@ -37,10 +38,11 @@ is a verdict that cannot fail to parse.
   combinations: Ollama backends whose judge model carries no `:cloud`
   tag, OpenAI, and Gemini. `t` requests it unconditionally (escape
   hatch for future support); `nil` never requests it.
-- Parsing becomes dual-layer and mode-independent: strip leaked
-  reasoning blocks and markdown fences, try the JSON object, fall
-  back to the existing text contract (last standalone SAFE/UNSAFE
-  line); a response satisfying neither is a parse-fail. Fail-closed
+- Parsing becomes dual-layer and mode-independent: try the JSON
+  object (one surrounding code fence tolerated), fall back to the
+  existing divider text contract (first standalone SAFE/UNSAFE line
+  divides reasoning from rationale); a response satisfying neither
+  is a parse-fail. Fail-closed
   semantics are unchanged everywhere.
 - The prompt's response-format instruction becomes the JSON object
   shape in all modes — Ollama's structured-outputs guide recommends
@@ -71,8 +73,8 @@ is a verdict that cannot fail to parse.
   instruction, new defcustom, docstrings).
 - Tests: `tests/gptel-permit-judge-test.el` (payload dry-run with
   `:format`, gating table, dual-layer parser table, request keyword
-  test); existing text-parser tests keep passing as the fallback
-  layer.
+  test); the divider text-parser tests (see `judge-divider-parse`)
+  keep passing as the fallback layer.
 - Docs: README (structured outputs section, support matrix, cloud
   caveat, request-params `:format` clobber warning).
 - No analytics code change (verdict/rationale shapes unchanged); rule

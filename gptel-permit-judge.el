@@ -75,7 +75,8 @@ precedence: gptel's request defaults < these params < the backend's
 `:request-params' < the model's `:request-params'.  The effective
 value is logged via `gptel-permit--log' on every judge request.
 
-When nil (the default), thinking-off parameters are derived from the
+When nil (the default) and `gptel-permit-judge-control-thinking'
+is non-nil, thinking-off parameters are derived from the
 judge backend's type (see `gptel-permit--judge-thinking-off-params'):
 Anthropic `(:thinking (:type \"disabled\"))', OpenAI
 `(:reasoning_effort \"minimal\")', Gemini `(:generationConfig
@@ -96,23 +97,46 @@ not use this plist to carry unrelated generation settings.
 Caveat (Ollama cloud models): `:cloud'-tagged Ollama models have been
 observed to ignore the derived `:think :json-false' and interleave
 their reasoning with the answer text.  Verdict parsing tolerates
-leaked reasoning (see `gptel-permit--judge-parse-verdict'): thinking
-blocks are stripped and the verdict is read from the last standalone
-SAFE/UNSAFE line."
+leaked reasoning (see `gptel-permit--judge-parse-verdict'): the first
+standalone SAFE/UNSAFE line divides the response — text above it is
+dropped as reasoning, text below it is the rationale."
   :type '(choice (const :tag "Derive thinking-off params per backend" nil)
                  (plist :tag "Fixed plist of request parameters"
                         :key-type symbol :value-type sexp))
   :group 'gptel-permit-judge)
+
+(defcustom gptel-permit-judge-control-thinking t
+  "Whether to try to control the judge model's thinking behavior.
+When non-nil (the default), thinking-suppression parameters are
+derived per backend (see `gptel-permit--judge-thinking-off-params')
+and merged into the judge request.  When nil, nothing is derived:
+the judge request carries no thinking-related parameters at all, so
+the model runs with its backend default.  Parameters you set
+explicitly via `gptel-permit-judge-request-params' are always sent
+verbatim, regardless of this switch.
+
+Why nil: some models ignore these fields — one Ollama cloud model
+(glm) has been observed to leak *more* reasoning into its answer
+when a think parameter is sent than when the request says nothing
+at all.  If your judge leaks reasoning or glues its verdict onto a
+prose line, try nil; the parser tolerates leaked reasoning anyway
+(see `gptel-permit--judge-parse-verdict')."
+  :package-version '(gptel-permit . "0.4")
+  :type 'boolean
+  :group 'gptel-permit-judge)
+
 
 
 (defvar-local gptel-permit--last-judge-rationale nil
   "Rationale from the most recent judge verdict in this buffer.
 Set by `gptel-permit-judge-safe-p'; intended for audit/analytics.
 For an evaluated verdict (`safe' or `unsafe') this is the judge's own
-rationale line, or \"\" when the response carried none.  For the
-failure class `parse-fail' this holds the truncated raw judge
-response (the response the judge produced but could not be parsed);
-for `request-fail' and `timeout' it is nil — no response arrived.")
+rationale — the response text below the divider verdict line, or
+\"\" when the response carried none.  For the failure class
+`parse-fail' this holds the full raw judge response, kept untruncated
+to aid debugging (the response the judge produced but could not be
+parsed); for `request-fail' and `timeout' it is nil — no response
+arrived.")
 
 (defvar-local gptel-permit--last-judge-verdict nil
   "Verdict symbol from the most recent judge run in this buffer.
@@ -224,7 +248,9 @@ explicitly (including `user-error' from `gptel-get-backend'); the
 explicit (quit) handler plus `with-local-quit' in the body keep C-g
 interruptible.  The effective request parameters (see
 `gptel-permit-judge-request-params') are let-bound as
-`gptel--request-params' around the request and logged once.  The
+`gptel--request-params' around the request and logged once;
+thinking-off parameters are derived only while
+`gptel-permit-judge-control-thinking' is non-nil.  The
 request is issued with `:system nil': no system message is sent, so
 the calling buffer's system prompt — persona or role directive —
 never reaches the judge; the judge preamble is the only
@@ -238,8 +264,9 @@ role-setting text the model sees."
             (let* ((backend (gptel-get-backend gptel-permit-judge-backend))
                    (gptel--request-params
                     (or gptel-permit-judge-request-params
-                        (gptel-permit--judge-thinking-off-params
-                         backend gptel-permit-judge-model)))
+                        (when gptel-permit-judge-control-thinking
+                          (gptel-permit--judge-thinking-off-params
+                           backend gptel-permit-judge-model))))
                    (gptel-backend backend)
                    (gptel-model gptel-permit-judge-model)
                    (gptel-use-tools nil)
@@ -271,40 +298,45 @@ role-setting text the model sees."
                              gptel-permit-judge-timeout)
           (list :class 'timeout :response nil))))))
 
-(defun gptel-permit--judge-strip-thinking (response)
-  "Return RESPONSE with inline thinking blocks removed.
-Some models — notably Ollama cloud models that ignore the derived
-`:think :json-false' request field — interleave their reasoning with
-the answer, delimited by `​'/`​' or
-`​'/`​' blocks.  Both forms are removed
-(case-insensitively, lazily up to the first closing tag); unclosed
-blocks are left alone and text outside the blocks is kept."
-  (let ((case-fold-search t))
-    (replace-regexp-in-string
-     "\\(?:​\\(?:.\\|\n\\)*?​\\|<thinking>\\(?:.\\|\n\\)*?</thinking>\\)"
-     "" response)))
+(defconst gptel-permit--judge-think-close-re
+  "</\\(?:[Tt][Hh][Ii][Nn][Kk][Ii][Nn][Gg]\\|[Tt][Hh][Ii][Nn][Kk]\\)>"
+  "Regexp matching a closing reasoning tag emitted by some models.
+Applied to the raw judge response before the divider rules: a
+closing tag (glued onto a prose line or on its own) marks where
+leaked reasoning ends and the answer starts.  Built from character
+classes so this source file carries no literal tag bytes.")
 
+(defun gptel-permit--judge-drop-thinking (response)
+  "Return RESPONSE with leaked reasoning dropped, heuristically.
+When a closing reasoning tag (see `gptel-permit--judge-think-close-re')
+appears anywhere in RESPONSE, everything up to and including the
+LAST one is treated as reasoning and dropped: the answer starts
+after it.  Without a closing tag, RESPONSE is returned unchanged —
+an unclosed reasoning block provides no trustworthy boundary, and
+the divider rules of `gptel-permit--judge-parse-verdict' decide on
+the full text."
+  (or (car (last (split-string response
+                                gptel-permit--judge-think-close-re t)))
+      ""))
 
 (defun gptel-permit--judge-parse-verdict (response)
   "Parse RESPONSE into (VERDICT . RATIONALE), or nil if unparseable.
-VERDICT is the symbol `safe' or `unsafe'.  RATIONALE is the text
-after the verdict line (possibly empty).
-
-Reasoning that leaks into the answer does not hide the verdict:
-thinking blocks are stripped first (see
-`gptel-permit--judge-strip-thinking'), and the verdict is the last
-line whose trimmed, upcased text is exactly SAFE or UNSAFE — thinking
-models draft and explore before their final answer, so earlier
-standalone verdict lines may exist.  If SAFE and UNSAFE both appear
-as standalone lines (an exploratory draft disagreeing with a later
-verdict), the response is unparseable: fail-closed, no guessing.
-Conforming responses (verdict on the first line) parse as before.
-Anything else — including a verdict word glued mid-line — returns
-nil."
+VERDICT is the symbol `safe' or `unsafe'.  First the closing-tag
+heuristic runs: when the response contains a closing reasoning tag,
+everything up to and including the last one is dropped as reasoning
+(see `gptel-permit--judge-drop-thinking').  Then the divider applies
+to what remains: the first line whose trimmed, upcased text is
+exactly SAFE or UNSAFE divides it — everything above is leaked
+reasoning and is dropped; everything below is RATIONALE (possibly
+empty; later standalone verdict words stay in it).  Verdict words
+glued into longer lines do not count.  If no standalone SAFE/UNSAFE
+line exists, or both words appear as standalone lines anywhere in
+the remaining text (an exploratory draft disagreeing with the
+conclusion), the response is unparseable: callers treat that as a
+failed judgement, fail-closed."
   (when (stringp response)
-    (let* ((lines (split-string
-                   (string-trim (gptel-permit--judge-strip-thinking response))
-                   "\n"))
+    (let* ((answer (gptel-permit--judge-drop-thinking response))
+           (lines (split-string answer "\n"))
            (hits (delq nil
                        (seq-map-indexed
                         (lambda (line idx)
@@ -314,21 +346,22 @@ nil."
                             (_ nil)))
                         lines)))
            (values (delete-dups (mapcar #'cdr hits)))
-           (last-hit (car (last hits))))
-      (when (and last-hit (= (length values) 1))
-        (cons (cdr last-hit)
+           (divider (car hits)))
+      (when (and divider (= (length values) 1))
+        (cons (cdr divider)
               (string-trim
                (mapconcat #'identity
-                          (nthcdr (1+ (car last-hit)) lines)
+                          (nthcdr (1+ (car divider)) lines)
                           "\n")))))))
 
 (defun gptel-permit--judge-evaluate (result)
   "Reduce judge request RESULT to a verdict and record it in this buffer.
 RESULT is the outcome plist from `gptel-permit--judge-request-sync'.
 Records the verdict in `gptel-permit--last-judge-verdict' and the
-rationale (or the truncated raw response, for `parse-fail') in
-`gptel-permit--last-judge-rationale' — see their docstrings — logs the
-evaluated verdict, and returns the verdict symbol: `safe' or `unsafe'
+rationale (or the full raw response for `parse-fail', kept untruncated
+to aid debugging) in `gptel-permit--last-judge-rationale' — see their
+docstrings — logs the evaluated verdict, and returns the verdict
+symbol: `safe' or `unsafe'
 when the response parsed, or a failure class (`parse-fail',
 `request-fail', `timeout').  A C-g interruption is recorded as
 `timeout'; every failure keeps the condition deny-only."
@@ -346,7 +379,7 @@ when the response parsed, or a failure class (`parse-fail',
           gptel-permit--last-judge-rationale
           (pcase verdict
             ((or 'safe 'unsafe) (or (cdr parsed) ""))
-            ('parse-fail (gptel-permit--truncate-arg (or response "")))
+            ('parse-fail (or response ""))
             (_ nil)))
     (if parsed
         (gptel-permit--log "Judge verdict: %s rationale: %s"
