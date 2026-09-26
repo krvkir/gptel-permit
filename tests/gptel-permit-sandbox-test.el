@@ -213,6 +213,7 @@
               ((symbol-function 'executable-find)
                (lambda (name &optional _r) (and (equal name "srt") "/usr/bin/srt"))))
       (let ((result (gptel-permit--sandbox-action
+                     "sandbox-test-id"
                      (gptel-permit--enrich-tool-call
                       (list :name "Bash" :args '(:command "make test"))))))
         (should (eq (plist-get result :confirm) nil))
@@ -220,6 +221,7 @@
                                  (plist-get (plist-get result :args) :command)))))
     (cl-letf (((symbol-function 'executable-find) (lambda (_name) nil)))
       (should (equal (gptel-permit--sandbox-action
+                      "sandbox-test-id"
                       (gptel-permit--enrich-tool-call
                        (list :name "Bash" :args '(:command "make test"))))
                      '(:confirm t))))))
@@ -329,6 +331,7 @@ and resets the counter."
     (cl-letf (((symbol-function 'executable-find) (lambda (_name) "/usr/bin/bwrap"))
               ((symbol-function 'file-exists-p) (lambda (_p) nil)))
       (should (equal (gptel-permit--sandbox-action
+                      "sandbox-test-id"
                       (gptel-permit--enrich-tool-call
                        (list :name "Bash" :args '(:command "ls"))))
                      '(:confirm t)))
@@ -358,6 +361,31 @@ and resets the counter."
            :args '(:command "plain command")
            :result "Command failed with exit code 1:\nPermission denied"))
     (should (eq gptel-permit--sandbox-fail-streak 2))))
+
+;; -------------------------------------------------------------------
+;; Self-registration at load
+;; -------------------------------------------------------------------
+
+(ert-deftest gptel-permit-sandbox-load-registers-action-handler ()
+  "Requiring the module registers the sandbox action in the registry."
+  (should (eq (cdr (assq 'sandbox gptel-permit-action-handlers))
+              #'gptel-permit--sandbox-action)))
+
+(ert-deftest gptel-permit-sandbox-load-registers-post-tool-tracker ()
+  "Requiring the module adds the boundary tracker to gptel's post-tool hook."
+  (should (memq #'gptel-permit-sandbox--post-tool
+                gptel-post-tool-call-functions)))
+
+(ert-deftest gptel-permit-sandbox-reload-stays-single-registered ()
+  "Loading the module twice leaves one registry entry and one hook fn."
+  (load "gptel-permit-sandbox" nil t)
+  (load "gptel-permit-sandbox" nil t)
+  (should (= 1 (cl-count-if (lambda (entry)
+                              (eq (car entry) 'sandbox))
+                            gptel-permit-action-handlers)))
+  (should (= 1 (cl-count #'gptel-permit-sandbox--post-tool
+                         gptel-post-tool-call-functions))))
+
 
 (provide 'gptel-permit-sandbox-test)
 ;;; gptel-permit-sandbox-test.el ends here

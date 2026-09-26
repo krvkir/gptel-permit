@@ -23,8 +23,8 @@
 
 (declare-function gptel-tool-p "gptel-request" (object))
 (declare-function gptel-tool-name "gptel-request" (tool))
-(declare-function gptel-permit--sandbox-action "gptel-permit-sandbox" (tool-call))
-(declare-function gptel-permit-sandbox--post-tool "gptel-permit-sandbox" (tool-call))
+
+
 
 (defgroup gptel-permit nil
   "Rule-based tool-call permissions for gptel."
@@ -84,7 +84,10 @@ A rule may contain the following keys:
   :tool         A concrete tool name (string).
   :tool-group   A tool group symbol (e.g. read, write, shell).
   :conditions   An alist of (KEY . PATTERN) pairs.
-  :action       One of allow, deny, ask, or sandbox.
+  :action       One of allow, deny, ask, or any action symbol
+                registered in `gptel-permit-action-handlers'
+                (e.g. sandbox, provided by the optional sandbox
+                module).
 
 If both :tool and :tool-group are present, :tool takes
 precedence and a warning is emitted.  If neither :tool nor
@@ -131,7 +134,7 @@ Customize this variable or override it in your init file."
                       (choice (const :tag "Allow (auto-approve)" allow)
                               (const :tag "Deny (auto-block)" deny)
                               (const :tag "Ask (prompt user)" ask)
-                              (const :tag "Sandbox (wrap command and auto-run)" sandbox))))))
+                              (symbol :tag "Registered action"))))))
   :group 'gptel-permit)
 
 (defvar-local gptel-permit-rules nil
@@ -396,105 +399,152 @@ Returns the rule's :action if matched, otherwise nil."
             (gptel-permit--log "Rule matched!")
             action))))))
 
-(defun gptel-permit--rule-action (tool-call)
-  "Evaluate rules for TOOL-CALL and return action, or nil."
-  (let ((rules (append gptel-permit-rules gptel-permit-global-rules))
-        (action nil))
-    (catch 'found
-      (dolist (rule rules)
-        (let ((act (gptel-permit--match-rule-p rule tool-call)))
-          (when act
-            (setq action act)
-            (throw 'found t)))))
-    action))
+(defun gptel-permit--action-allow (_id _tool-call)
+  "Built-in `allow' action handler: return `(:confirm nil)' (auto-approve)."
+  (list :confirm nil))
 
-(defun gptel-permit--sandbox-dispatch (tool-call)
-  "Run the sandbox action for TOOL-CALL when the sandbox module is loaded.
-Fail closed with `(:confirm t)' when `gptel-permit-sandbox' is not
-available, so a sandbox rule can never silently auto-run a tool."
-  (if (fboundp 'gptel-permit--sandbox-action)
-      (gptel-permit--sandbox-action tool-call)
-    (gptel-permit--log "Sandbox: gptel-permit-sandbox not loaded — failing closed")
-    (list :confirm t)))
+(defun gptel-permit--action-deny (_id _tool-call)
+  "Built-in `deny' action handler: return `(:block \"auto-denied\")' (reject)."
+  (list :block "auto-denied"))
 
-(defun gptel-permit--post-tool-dispatch (tool-call)
-  "Dispatch post-tool events to optional gptel-permit sub-packages.
-TOOL-CALL is the plist from `gptel-post-tool-call-functions'.  Inert
-unless the sandbox module is loaded (it tracks boundary failures there)."
-  (when (fboundp 'gptel-permit-sandbox--post-tool)
-    (gptel-permit-sandbox--post-tool tool-call))
-  nil)
+(defun gptel-permit--action-ask (_id _tool-call)
+  "Built-in `ask' action handler: return `(:confirm t)' (force prompt)."
+  (list :confirm t))
 
-;; Judge state variables, defined in `gptel-permit-judge' and reset per
-;; call so a stale verdict cannot leak into another call's analytics
-;; event.  Declarations only, for the compiler.
-(defvar gptel-permit--last-judge-rationale)
-(defvar gptel-permit--last-judge-verdict)
+(defvar gptel-permit-action-handlers
+  '((allow . gptel-permit--action-allow)
+    (deny  . gptel-permit--action-deny)
+    (ask   . gptel-permit--action-ask))
+  "Alist mapping rule action symbols to handler functions.
+A handler is called with (ID TOOL-CALL) — the tool-call id minted by
+`gptel-permit--mint-tool-call-id' and the enriched tool call — and returns a
+verdict plist per `gptel-pre-tool-call-functions', or nil to defer.  The
+built-in actions (allow, deny, ask) are registered here like any other;
+optional modules register their entries at load time, e.g. the sandbox
+module adds \(sandbox . gptel-permit--sandbox-action).  A matched action
+with no registered handler fails closed: see `gptel-permit--apply-rules'.")
 
-(defun gptel-permit--reset-judge-state ()
-  "Clear the judge's per-call verdict state in this buffer.
-The optional judge condition records its verdict and rationale in
-buffer-local variables during rule matching; those values pertain to a
-single tool call and are cleared before rule matching."
-  (when (boundp 'gptel-permit--last-judge-rationale)
-    (setq gptel-permit--last-judge-rationale nil))
-  (when (boundp 'gptel-permit--last-judge-verdict)
-    (setq gptel-permit--last-judge-verdict nil)))
+(defvar gptel-permit--tool-call-serial 0
+  "Serial component of tool-call ids minted in this Emacs session.")
 
-(defun gptel-permit--analytics-notify (type tool-call &optional id payload)
-  "Forward analytics event TYPE for TOOL-CALL to the analytics module.
-ID is the tool call's correlation id, allocated by a :tool-call event;
-PAYLOAD carries event specifics: the matched rule's action for
-:rule-match and the (ACTION . VERDICT) of the decision for :verdict.
-Returns the correlation id for :tool-call events, nil otherwise or when
-`gptel-permit-analytics' is not loaded."
-  (when (fboundp 'gptel-permit-analytics--emit)
-    (gptel-permit-analytics--emit type tool-call id payload)))
+(defun gptel-permit--mint-tool-call-id ()
+  "Return a fresh tool-call id (a string).
+Format TIMESTAMP.PID.SERIAL — unique across sessions (timestamp,
+millisecond precision), concurrent Emacs processes (pid) and calls
+within a process (serial), without any coordination with consumers.
+All events of one tool call share the id minted for that call.  The
+id is minted here and unrelated to the backend tool-call ids gptel
+attaches to tool calls internally, which never reach the tool-call
+hooks."
+  (format "%s.%d.%d"
+          (format-time-string "%Y%m%dT%H%M%S.%3N")
+          (emacs-pid)
+          (cl-incf gptel-permit--tool-call-serial)))
 
-(defun gptel-permit--analytics-sample (verdict tool-call id)
-  "Return VERDICT, possibly upgraded to `(:confirm t)' by audit sampling.
-Sampling is performed by the optional `gptel-permit-analytics' module
-and only applies while analytics is active; verdicts pass through
-unchanged when the module is not loaded."
-  (if (fboundp 'gptel-permit-analytics--maybe-sample)
-      (gptel-permit-analytics--maybe-sample verdict tool-call id)
-    verdict))
+(defvar gptel-permit-before-rule-match-functions nil
+  "Abnormal hook run once per tool call before rule matching.
+Called with (ID TOOL-CALL); return values are ignored.  Modules use it
+for per-call state lifecycle (e.g. the judge clears its per-call verdict
+state here).  Errors are not caught: they fail the call closed.")
+
+(defvar gptel-permit-events-functions nil
+  "Abnormal hook observing the engine's events.
+Called with (ID TOOL-CALL TYPE PAYLOAD) where TYPE is one of :tool-call,
+:rule-match, :verdict or :confirm and PAYLOAD is nil, the matched action
+symbol (nil when no rule matched), (ACTION . VERDICT) or nil
+respectively.  The event type set is open: future engine versions may
+emit additional event types through this hook with the same signature.
+Each function runs isolated in `condition-case' (see
+`gptel-permit--emit-event'): an erroring observer is logged and can
+never alter a verdict.")
+
+(defvar gptel-permit-veto-functions nil
+  "Abnormal hook run after a verdict is computed, before it is returned.
+Called with (ID TOOL-CALL VERDICT) via `run-hook-with-args-until-success'
+and only when a rule matched.  A non-nil return upgrades the verdict to
+`(:confirm t)', preserving any :args rewrite; the engine — not the veto
+function — performs the upgrade.  Veto functions inspect VERDICT and can
+only veto: they never return modified verdicts.  Errors are not caught:
+they fail the call closed.")
+
+(defun gptel-permit--emit-event (id tool-call type payload)
+  "Emit an engine event (ID TOOL-CALL TYPE PAYLOAD).
+Delivery to the observers on `gptel-permit-events-functions' is an
+implementation detail of no concern to the caller: each observer runs
+isolated in `condition-case', an erroring observer is logged and
+skipped, and later observers still run.  Never signals; observers can
+never alter a verdict."
+  (dolist (fn gptel-permit-events-functions)
+    (condition-case err
+        (funcall fn id tool-call type payload)
+      (error (gptel-permit--log "Event observer %S failed: %S" fn err)))))
 
 
+(defun gptel-permit--find-action (id tool-call)
+  "Return the action of the first rule matching TOOL-CALL, or nil.
+ID is the tool-call id.  Session-local rules are checked first, then
+global; first match wins.  Renamed from `gptel-permit--rule-action':
+it finds the action, and it now also reports it — a :rule-match event
+is emitted through `gptel-permit--emit-event' at the moment the match
+is decided: inside the loop on the first matching rule, or once with
+nil action after all rules failed to match."
+  (catch 'found
+    (dolist (rule (append gptel-permit-rules gptel-permit-global-rules))
+      (when-let* ((action (gptel-permit--match-rule-p rule tool-call)))
+        (gptel-permit--emit-event id tool-call :rule-match action)
+        (throw 'found action)))
+    (gptel-permit--emit-event id tool-call :rule-match nil)
+    nil))
 
 (defun gptel-permit--apply-rules (tool-call)
   "Enforce permission rules for TOOL-CALL.
-Session-local rules are checked first, then global rules.
-Returns a plist with :confirm, :block, or nil (fallback).
-A `sandbox' action returns `(:confirm nil :args …)' with the wrapped
-command.  On unexpected error, fail closed with `(:confirm t)'.
-When the optional analytics module is loaded, decision-chain events
-(tool-call, rule-match, verdict, confirm) are emitted and automation
-allows may be audited by upgrading them to `(:confirm t)'."
+Session-local rules are checked first, then global; first match wins.
+A matched action dispatches through `gptel-permit-action-handlers'; an
+action with no registered handler fails closed with (:confirm t), so
+no unresolved rule can silently auto-run a tool.  No match returns nil
+(defer).  On unexpected error, fail closed with (:confirm t).
+
+Events: the call's tool-call id is minted
+(`gptel-permit--mint-tool-call-id') and the call's events are emitted
+through `gptel-permit--emit-event' —
+:tool-call, then :rule-match (from `gptel-permit--find-action'), then
+:verdict, then :confirm when the final verdict asks.  Before matching,
+`gptel-permit-before-rule-match-functions' runs; after the verdict,
+`gptel-permit-veto-functions' is consulted: a non-nil veto upgrades
+the verdict to (:confirm t), preserving any :args rewrite."
   (condition-case err
       (unless (gptel-permit--processed-p tool-call)
         (let* ((enriched (gptel-permit--enrich-tool-call tool-call))
+               (id (gptel-permit--mint-tool-call-id))
                (name (plist-get enriched :name))
                (args (plist-get enriched :args))
                (trunc-args (cl-loop for (k v) on args by #'cddr
                                     collect k collect (gptel-permit--truncate-arg v))))
           (gptel-permit--log "Started rule checks for tool: %s with args: %S" name trunc-args)
-          (let ((id (gptel-permit--analytics-notify :tool-call enriched)))
-            (gptel-permit--reset-judge-state)
-            (let* ((action (gptel-permit--rule-action enriched))
-                   (verdict (pcase action
-                              ('allow   (list :confirm nil))
-                              ('deny    (list :block "auto-denied"))
-                              ('ask     (list :confirm t))
-                              ('sandbox (gptel-permit--sandbox-dispatch enriched))
-                              (_        nil))))
-              (gptel-permit--log "Verdict: %s" (or action "none (fallback)"))
-              (gptel-permit--analytics-notify :rule-match enriched id action)
-              (gptel-permit--analytics-notify :verdict enriched id (cons action verdict))
-              (setq verdict (gptel-permit--analytics-sample verdict enriched id))
-              (when (and (consp verdict) (plist-get verdict :confirm))
-                (gptel-permit--analytics-notify :confirm enriched id))
-              verdict))))
+          (gptel-permit--emit-event id enriched :tool-call nil)
+          (run-hook-with-args
+           'gptel-permit-before-rule-match-functions id enriched)
+          (let* ((action (gptel-permit--find-action id enriched))
+                 (handler (and action
+                               (cdr (assq action gptel-permit-action-handlers))))
+                 (verdict
+                  (cond ((null action) nil)
+                        (handler (funcall handler id enriched))
+                        (t (gptel-permit--log
+                            "No handler for action %S — failing closed" action)
+                           (list :confirm t)))))
+            (gptel-permit--log "Verdict: %s" (or action "none (fallback)"))
+            (gptel-permit--emit-event id enriched :verdict (cons action verdict))
+            (when (and action
+                       (run-hook-with-args-until-success
+                        'gptel-permit-veto-functions id enriched verdict))
+              (setq verdict
+                    (if (plist-get verdict :args)
+                        (list :confirm t :args (plist-get verdict :args))
+                      (list :confirm t))))
+            (when (and (consp verdict) (plist-get verdict :confirm))
+              (gptel-permit--emit-event id enriched :confirm nil))
+            verdict)))
     (error
      (gptel-permit--log "Error in --apply-rules: %S — failing closed" err)
      (list :confirm t))))
@@ -570,22 +620,20 @@ allows may be audited by upgrading them to `(:confirm t)'."
 (define-minor-mode gptel-permit-mode
   "Minor mode for rule-based tool-call permissions in gptel.
 When enabled, registers validation and permission hooks on
-`gptel-pre-tool-call-functions', a post-tool dispatch hook (inert unless
-the optional sandbox module is loaded), and binds `C-c C-b' in
-`gptel-tool-call-actions-map' for interactive rule creation."
+`gptel-pre-tool-call-functions' and binds `C-c C-b' in
+`gptel-tool-call-actions-map' for interactive rule creation.
+Optional modules integrate through the core's extension points (see
+`gptel-permit-action-handlers' and the engine hooks), not through this
+mode."
   :global t
   :lighter " Permit"
   (if gptel-permit-mode
       (progn
         (add-hook 'gptel-pre-tool-call-functions #'gptel-permit--validate-args t)
         (add-hook 'gptel-pre-tool-call-functions #'gptel-permit--apply-rules t)
-        (add-hook 'gptel-post-tool-call-functions
-                  #'gptel-permit--post-tool-dispatch t)
         (keymap-set gptel-tool-call-actions-map "C-c C-b" #'gptel-permit-add-rule))
     (remove-hook 'gptel-pre-tool-call-functions #'gptel-permit--validate-args)
     (remove-hook 'gptel-pre-tool-call-functions #'gptel-permit--apply-rules)
-    (remove-hook 'gptel-post-tool-call-functions
-                 #'gptel-permit--post-tool-dispatch)
     (keymap-unset gptel-tool-call-actions-map "C-c C-b")))
 
 (provide 'gptel-permit)

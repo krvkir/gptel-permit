@@ -260,11 +260,13 @@ are used as given (srt resolves ~ itself)."
        (cl-some (lambda (re) (string-match-p re result))
                 gptel-permit-sandbox--boundary-error-regexps)))
 
-(defun gptel-permit--sandbox-action (tool-call)
+(defun gptel-permit--sandbox-action (_id tool-call)
   "Return the sandbox verdict for the enriched TOOL-CALL.
-On success: `(:confirm nil :args (:command WRAPPED))' with other
-arguments preserved.  Fail closed with `(:confirm t)' when the tool has
-no :command, when the configured backend's binary is missing, or when
+_ID is the tool-call id minted by the rule engine; it is ignored today and
+reserved for judge-async event correlation.  On success:
+`(:confirm nil :args (:command WRAPPED))' with other arguments
+preserved.  Fail closed with `(:confirm t)' when the tool has no
+:command, when the configured backend's binary is missing, or when
 `gptel-permit-sandbox-retry-limit' consecutive sandboxed failures are
 reached (human triage; the counter resets)."
   (let ((args (plist-get tool-call :args))
@@ -314,6 +316,20 @@ resets it.  Returns nil."
         (setq gptel-permit--sandbox-fail-streak 0)
         (gptel-permit--log "Sandbox: command OK; failure counter reset"))))
   nil)
+
+;; Self-registration at load time: the sandbox action goes into the
+;; core's action registry and the boundary-failure tracker goes onto
+;; gptel's post-tool hook directly — the core knows nothing about the
+;; sandbox.  Both registrations are idempotent across reloads (the setf
+;; overwrites an existing entry; `add-hook' with a named function adds
+;; once).  The post-tool tracker is inert while the mode never wrapped a
+;; command (the remember-registry is empty), so loading with
+;; `gptel-permit-mode' off is harmless; removal is not tied to the mode.
+(setf (alist-get 'sandbox gptel-permit-action-handlers)
+      #'gptel-permit--sandbox-action)
+(add-hook 'gptel-post-tool-call-functions
+          #'gptel-permit-sandbox--post-tool)
+
 
 (provide 'gptel-permit-sandbox)
 ;;; gptel-permit-sandbox.el ends here

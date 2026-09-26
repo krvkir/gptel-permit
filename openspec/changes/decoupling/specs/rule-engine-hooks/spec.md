@@ -2,8 +2,8 @@
 
 ## ADDED Requirements
 
-### Requirement: Core-minted correlation ids
-The rule engine SHALL mint one correlation id per processed pre-tool call,
+### Requirement: Core-minted tool-call ids
+The rule engine SHALL mint one tool-call id per processed pre-tool call,
 unconditionally — including when no hook functions are registered. The id
 SHALL be a string of the form `TIMESTAMP.PID.SERIAL` (local timestamp with
 millisecond precision, the Emacs process id, a process-wide serial), unique
@@ -27,7 +27,7 @@ or depend on any analytics module state, including its log file.
   present, and no file or module state SHALL be touched.
 
 ### Requirement: Uniform engine callback signature
-Every engine callback — action handlers and the functions on the three engine hooks — SHALL receive the correlation ID as its first argument and the enriched TOOL-CALL as its second argument.
+Every engine callback — action handlers and the functions on the three engine hooks — SHALL receive the tool-call ID as its first argument and the enriched TOOL-CALL as its second argument.
 Callback-specific arguments follow. Any callback that needs neither
 SHALL declare them with underscore names.
 
@@ -62,7 +62,7 @@ the security hook's fail-closed error handling (`(:confirm t)`).
 
 ### Requirement: Events hook
 `gptel-permit-events-functions` SHALL be an abnormal hook observing the
-engine's decisions, called with `(ID TOOL-CALL TYPE PAYLOAD)` where TYPE is
+engine's events, called with `(ID TOOL-CALL TYPE PAYLOAD)` where TYPE is
 one of `:tool-call`, `:rule-match`, `:verdict` or `:confirm`, and PAYLOAD
 is nil for `:tool-call` and `:confirm`, the matched action symbol (nil when
 no rule matched) for `:rule-match`, and `(ACTION . VERDICT)` for

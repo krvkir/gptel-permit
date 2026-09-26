@@ -122,14 +122,20 @@
          '((:tool "Read" :conditions ((:file_path . "logs")) :action allow)))
         (gptel-permit-global-rules
          '((:tool "Read" :conditions ((:file_path . "logs")) :action ask))))
-    (should (eq (gptel-permit--rule-action (gptel-permit--enrich-tool-call (list :name "Read" :args '(:file_path "logs/debug.txt"))))
+    (should (eq (gptel-permit--find-action
+                 "test-id"
+                 (gptel-permit--enrich-tool-call
+                  (list :name "Read" :args '(:file_path "logs/debug.txt"))))
                 'allow))))
 
 (ert-deftest gptel-permit-rule-no-match-fallback ()
   "When no rule matches, nil is returned."
   (let ((gptel-permit-rules nil)
         (gptel-permit-global-rules nil))
-    (should (null (gptel-permit--rule-action (gptel-permit--enrich-tool-call (list :name "Read" :args '(:file_path "random.txt"))))))))
+    (should (null (gptel-permit--find-action
+                   "test-id"
+                   (gptel-permit--enrich-tool-call
+                    (list :name "Read" :args '(:file_path "random.txt"))))))))
 
 ;; -------------------------------------------------------------------
 ;; Path normalization in rules

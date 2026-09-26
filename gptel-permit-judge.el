@@ -147,7 +147,8 @@ unknown backend name, HTTP error, no response) or `timeout'
 (`gptel-permit-judge-timeout' elapsed, or the wait was interrupted
 with C-g), or nil when no judge run occurred.  Set by
 `gptel-permit-judge-safe-p'; reset per tool call by
-`gptel-permit--reset-judge-state'; intended for audit/analytics.")
+`gptel-permit-judge--reset-state' on
+`gptel-permit-before-rule-match-functions'; intended for audit/analytics.")
 
 
 (defconst gptel-permit--judge-preamble
@@ -412,6 +413,22 @@ disabled or has not run."
                      (gptel-permit--judge-build-prompt value tool-call)))))
       (message nil)
       (eq verdict 'safe))))
+
+(defun gptel-permit-judge--reset-state (_id _tool-call)
+  "Clear the judge's per-call verdict state in this buffer.
+_ID and _TOOL-CALL are the call's tool-call id and the enriched tool call;
+both are ignored.  Runs once per processed tool call, before rule
+matching, on `gptel-permit-before-rule-match-functions', so state set by
+a judged call can never leak into a later, unjudged call's analytics
+events."
+  (setq gptel-permit--last-judge-rationale nil
+        gptel-permit--last-judge-verdict nil))
+
+;; Self-registration at load time: the core owns no judge symbols.  The
+;; named function makes repeated loads idempotent.
+(add-hook 'gptel-permit-before-rule-match-functions
+          #'gptel-permit-judge--reset-state)
+
 
 (provide 'gptel-permit-judge)
 ;;; gptel-permit-judge.el ends here

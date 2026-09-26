@@ -36,11 +36,11 @@ stable nor run meaningfully "with no additions" as a design contract.
   function moves into `gptel-permit-judge.el` and hooks itself at load;
   the core drops `--reset-judge-state` and the bare `defvar`
   declarations of the judge's state variables.
-- **Core-minted correlation ids.** The core allocates an id per tool
-  call (`gptel-permit--mint-id`: `timestamp.pid.serial` string), unique
+- **Core-minted tool-call ids.** The core allocates an id per tool
+  call (`gptel-permit--mint-tool-call-id`: `timestamp.pid.serial` string), unique
   across sessions and concurrent Emacs processes without coordination —
   replacing the analytics module's integer serial seeded by scanning its
-  log file (deleted). **BREAKING** (internal): correlation ids become
+  log file (deleted). **BREAKING** (internal): tool-call ids become
   strings; the stats folding accepts both historical numeric and new
   string ids.
 - **Events hook.** New abnormal hook
@@ -78,7 +78,7 @@ touching the gptel-decision-capture advice trio; generalizing the
 
 ### New Capabilities
 - `rule-engine-hooks`: the core's extension contract — core-minted unique
-  correlation ids, the three abnormal hooks
+  tool-call ids, the three abnormal hooks
   (`gptel-permit-before-rule-match-functions`,
   `gptel-permit-events-functions`, `gptel-permit-veto-functions`) with
   their uniform `(ID TOOL-CALL …)` signature prefix, firing points
@@ -96,13 +96,13 @@ touching the gptel-decision-capture advice trio; generalizing the
 - `llm-judge`: the judge owns and resets its per-call state via
   `gptel-permit-before-rule-match-functions`; no judge symbols remain in
   the core.
-- `analytics`: correlation ids arrive from the core as strings; the
+- `analytics`: tool-call ids arrive from the core as strings; the
   serial/seeding machinery is removed; capture and audit sampling ride
   the two core hooks; statistics tolerate numeric and string ids.
 
 ## Impact
 
-- **Code**: `gptel-permit.el` (≈120 lines churn: registry, mint-id, three
+- **Code**: `gptel-permit.el` (≈120 lines churn: registry, tool-call-id minting, three
   hooks, `--apply-rules` rebuild, deletions; net shrinkage),
   `gptel-permit-sandbox.el`, `gptel-permit-judge.el`,
   `gptel-permit-analytics.el`, the four test suites, README,

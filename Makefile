@@ -18,6 +18,7 @@ test: clean
 		-l gptel-permit-test.el \
 		-l gptel-permit-tool-groups-test.el \
 		-l gptel-permit-rule-engine-test.el \
+		-l gptel-permit-rule-engine-hooks-test.el \
 		-l gptel-permit-validation-test.el \
 		-l gptel-permit-hook-integration-test.el \
 		-l gptel-permit-callable-conditions-test.el \

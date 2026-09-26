@@ -24,6 +24,14 @@ Design constraint from review: the primary goal is unfreezing *other*
 buffers. The session buffer showing a prompt during the wait is acceptable;
 we do not add machinery to suppress it here.
 
+Dependency: this change builds on the `decoupling` change (implemented).
+The judge action is a handler in `gptel-permit-action-handlers` with the
+uniform `(ID TOOL-CALL)` signature — the tool-call id is what correlates the async
+callback's `judge-verdict` events with the call's chain — and audit
+sampling of judge-gated calls arrives through the engine's veto hook
+(`gptel-permit-veto-functions`), not through any analytics call from the
+core.
+
 ## Goals / Non-Goals
 
 **Goals:**
@@ -58,7 +66,8 @@ we do not add machinery to suppress it here.
    forms (wrong arity, unknown symbols) log a warning and resolve as
    `ask`.
    *Note on naming:* the existing deny action symbol is `deny`
-   (`gptel-permit--apply-rules` maps it to `(:block "auto-denied")`); the
+   (the registered built-in handler `gptel-permit--action-deny` maps it
+   to `(:block "auto-denied")`); the
    judge grammar reuses it rather than introducing `block`.
 
 2. **The judge resolves, conditions match.** A rule with a judge action
@@ -83,10 +92,16 @@ we do not add machinery to suppress it here.
 
 4. **Sync and async share one verdict→action mapping.** A single function
    maps `(verdict on-safe on-unsafe)` → resolution verdict plist:
-   SAFE → action verdict of ON-SAFE (sandbox goes through the adapter
-   registry); UNSAFE → action verdict of ON-UNSAFE; failure →
-   `(:confirm t)`. Sync mode calls it inline after the blocking request;
-   async mode calls it from the callback. Only the request timing differs.
+   SAFE → the verdict of ON-SAFE, UNSAFE → the verdict of ON-UNSAFE,
+   failure → `(:confirm t)`. ON-SAFE/ON-UNSAFE resolve by dispatching the
+   action symbol through `gptel-permit-action-handlers` (the core's action
+   registry: the built-in handlers and the sandbox action handler alike —
+   the sandbox handler performs its own args rewrite), *not* through the
+   sandbox tool-adapter registry of `sandbox-backend-registry`, which
+   wraps commands for concrete tools inside that handler and is an
+   internal detail of the sandbox module. Sync mode calls the mapping
+   inline after the blocking request; async mode calls it from the
+   callback. Only the request timing differs.
 
 5. **Async mode returns `(:confirm t)` and resolves from the callback.**
    `gptel-permit-judge-async` (default t): the hook stashes per-call context
@@ -113,8 +128,8 @@ we do not add machinery to suppress it here.
    pending call in the pack is judge-gated and all resolutions are
    uniform:
    - all accept-class (allow, or sandbox with args rewritten through the
-     adapter registry) → `gptel--accept-tool-calls` with the rewritten
-     triples;
+     action-registry sandbox handler) → `gptel--accept-tool-calls` with the
+     rewritten triples;
    - all `deny` → feed each pending triple's `process-tool-result` the
      rationale-bearing rejection (the steer pattern), then clean up
      overlay + prompts;
@@ -132,7 +147,7 @@ we do not add machinery to suppress it here.
 
 9. **Analytics: `judge-verdict` events + programmatic decisions +
    sampling suppression.**
-   - The callback emits a `judge-verdict` event (same correlation id as the
+   - The callback emits a `judge-verdict` event (same tool-call id as the
      tool-call event; fields: verdict incl. failure classes, rationale,
      judged arg value, latency) — emitted from the verdict-owning buffer so
      the judge state vars are current.
@@ -153,9 +168,16 @@ we do not add machinery to suppress it here.
 
 ## Implementation (mechanics deliberately kept out of the requirements)
 
-- Dispatch site: `gptel-permit--apply-rules` recognizes the judge forms in
-  the action slot; validation of the grammar happens at rule-evaluation
-  entry (malformed → warn + effective `ask`).
+- Dispatch site: the judge module registers a `judge` action handler in
+  `gptel-permit-action-handlers` (the core's action registry, introduced by
+  the `decoupling` change); `gptel-permit--apply-rules` contains no judge
+  knowledge. The handler is called with (ID TOOL-CALL) — the tool-call
+  id — which the async callback reuses so its `judge-verdict`
+  events correlate with the call's chain. List forms (`(judge A)`,
+  `(judge A B)`) reach the handler through list-form dispatch (a cons action
+  looks up its car in the registry); the engine side of that dispatch is a
+  rule-engine delta owned by this change. Validation of the grammar happens
+  at rule-evaluation entry (malformed → warn + effective `ask`).
 - Mapping: `gptel-permit--judge-action-verdict (verdict on-safe on-unsafe)`
   → resolution plist (shared by sync and async).
 - Stash: `gptel-permit--judge-pending` buffer-local alist keyed on

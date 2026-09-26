@@ -5,7 +5,7 @@
 ### Requirement: Action dispatch registry
 The rule engine SHALL resolve matched rule actions through a public alist
 `gptel-permit-action-handlers` mapping action symbols to handler functions.
-A handler SHALL be called with `(ID TOOL-CALL)` — the correlation id and
+A handler SHALL be called with `(ID TOOL-CALL)` — the tool-call id and
 the enriched tool call — and SHALL return a verdict plist per the gptel
 hook protocol, or nil to defer.
 

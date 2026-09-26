@@ -2,12 +2,12 @@
 This project provides rule-based auto-approval of tool calls for gptel's agentic LLM usage. Rules match tool calls by name and argument regexps, then auto-allow, auto-deny, or force-confirm.
 
 * Basic Project Structure
-- =gptel-permit.el= :: The rule engine core. Defines permission rules, condition predicates, the pre-tool-call security hook, and the global custom options.
-- =gptel-permit-judge.el= :: The optional `llm-judge` module: the `gptel-permit-judge-safe-p` condition callable, which asks a small local model whether an argument value is obviously safe. Fail-closed on every error path (never blocks; a failed judgement just makes the rule not match) and retains the verdict's rationale for analytics.
-- =gptel-permit-sandbox.el= :: The `sandbox` rule action: bubblewrap / srt command wrappers, protected-path detection, the pre-tool args-rewrite verdict, and the boundary-failure retry counter.
-- =gptel-permit-analytics.el= :: The optional `analytics` module: an append-only local JSONL decision log, audit sampling that up-ranks automation-allow verdicts to manual confirms, decision-capture advice on gptel's three interactive tool-call commands, and pure statistics/report functions. Inert until `gptel-permit-register-analytics-hooks` is called.
-- =tests/gptel-permit-test.el= :: ERT test suite covering argument normalization, rule matching, security hook behavior, and logging.
-- =README.org= :: User-facing documentation (installation, configuration, usage).
+- =gptel-permit.el= :: The rule engine core. Defines permission rules, condition predicates, the pre-tool-call security hook, the action registry (`gptel-permit-action-handlers`), the three engine hooks, tool-call-id minting, and the global custom options. Contains no module-specific code: it runs and stays meaningful with no optional module loaded.
+- =gptel-permit-judge.el= :: The optional `llm-judge` module: the `gptel-permit-judge-safe-p` condition callable, which asks a small local model whether an argument value is obviously safe. Fail-closed on every error path (never blocks; a failed judgement just makes the rule not match) and retains the verdict's rationale for analytics. Owns its per-call state and clears it via `gptel-permit-before-rule-match-functions`, self-registered at load.
+- =gptel-permit-sandbox.el= :: The `sandbox` rule action: bubblewrap / srt command wrappers, protected-path detection, the pre-tool args-rewrite verdict, and the boundary-failure retry counter. Self-registers its action handler in `gptel-permit-action-handlers` and its post-tool tracker on `gptel-post-tool-call-functions` at load; a sandbox rule with the module absent fails closed via the engine's unregistered-action path.
+- =gptel-permit-analytics.el= :: The optional `analytics` module: an append-only local JSONL decision log, audit sampling that up-ranks automation-allow verdicts to manual confirms, decision-capture advice on gptel's three interactive tool-call commands, and pure statistics/report functions. Inert until `gptel-permit-register-analytics-hooks` is called. Captures engine events through `gptel-permit-events-functions` and samples through `gptel-permit-veto-functions`; the core calls no analytics function by name. Tool-call ids arrive from the core as `TIMESTAMP.PID.SERIAL` strings.
+- =tests/= :: ERT test suites covering argument normalization, rule matching, engine hooks, validation, the security hook, the modules, and analytics (including the cross-module judge-state-leak acceptance test).
+- =README.org= :: User-facing documentation (installation, configuration, usage, extension points).
 - =Makefile= :: Batch test runner.
 
 * Development Approach
@@ -18,7 +18,10 @@ Agents SHALL keep changes small and testable:
 3. *Never miss a hard block*: Path traversal checks in =Write= and =Mkdir= fire before any rule matching and cannot be overridden by rules.
 4. *Log when debugging*: Rule matching is silent by default. Set =gptel-permit-log-enabled= to =t= to write diagnostics into =*gptel-permit-log*=.
 
-Keep elisp functions under 60 lines. The entire package is one file — resist the urge to split until the file exceeds 1000 lines.
+Keep elisp functions under 60 lines. The package is four modules — a
+stable core plus three optional add-ons; new functionality that is not
+core rule evaluation belongs in a module or registers through the
+core's extension points, never as core knowledge of a module's symbols.
 
 * Essential Development Commands
 - Run test suite: =make test=
@@ -28,5 +31,10 @@ Keep elisp functions under 60 lines. The entire package is one file — resist t
 * Integration Surface
 Every change must respect these integration points:
 - ~gptel-pre-tool-call-functions~ (hook) :: =gptel-permit= registers =gptel-permit--validate-args= and =gptel-permit--apply-rules= here when the mode is enabled. The hook is called by gptel's internal =gptel--handle-pre-tool=. Do not remove or rename this hook; if the signature changes, update tests.
+- ~gptel-post-tool-call-functions~ (hook) :: gptel's post-execution hook. Touched by the sandbox module at load (boundary-failure tracking; inert unless a command was wrapped). The minor mode no longer registers anything here.
+- ~gptel-permit-action-handlers~ (core alist) :: The action registry: action symbol → handler called as ~(ID TOOL-CALL)~ returning a verdict plist or nil. The core resolves matched actions only through it; a matched action with no handler fails closed (~(:confirm t)~). Modules register their actions at load, idempotently.
+- ~gptel-permit-before-rule-match-functions~ (core abnormal hook) :: ~(ID TOOL-CALL)~, run once per call before matching; per-call state lifecycle. Errors fail closed.
+- ~gptel-permit-events-functions~ (core abnormal hook) :: ~(ID TOOL-CALL TYPE PAYLOAD)~, the observer tap for the decision chain (:tool-call, :rule-match, :verdict, :confirm; the type set is open). Observers are per-function error-isolated and can never alter a verdict.
+- ~gptel-permit-veto-functions~ (core abnormal hook) :: ~(ID TOOL-CALL VERDICT)~ via =run-hook-with-args-until-success=, only when a rule matched. A non-nil return makes the engine upgrade the verdict to ~(:confirm t)~ preserving =:args=. Errors fail closed.
 - ~gptel-tool-call-actions-map~ (keymap) :: =C-c C-b= is bound to =gptel-permit-add-rule=. This keymap is applied to tool-call overlays by gptel. Do not bind other keys here without good reason.
 - ~gptel--accept-tool-calls~ (private function) :: Called by =gptel-permit-add-rule= to execute approved tool calls. This is gptel internal API — fragile but necessary. If gptel upstream changes it, =gptel-permit= must follow.

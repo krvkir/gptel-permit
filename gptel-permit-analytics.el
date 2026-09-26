@@ -77,11 +77,9 @@ never sampled.  Only active while analytics is registered and enabled."
 (defvar gptel-permit-analytics--registered nil
   "Non-nil once `gptel-permit-register-analytics-hooks' has run.")
 
-(defvar gptel-permit-analytics--serial 0
-  "Last allocated correlation id; continues after the file's maximum.")
 
-(defvar gptel-permit-analytics--serial-seeded nil
-  "Non-nil once `gptel-permit-analytics--serial' has been seeded.")
+
+
 
 (defvar gptel-permit-analytics--pending nil
   "Alist of (BUFFER TOOL ARGS) -> FIFO queue of (ID . CONFIRM-TIME).
@@ -139,7 +137,7 @@ Any element is nil when the tool call carries no such information."
   (if action (symbol-name action) "none"))
 
 (defun gptel-permit-analytics--base-event (type tool id &optional extra)
-  "Return the common event fields for TYPE, TOOL and correlation ID.
+  "Return the common event fields for TYPE, TOOL and tool-call ID.
 EXTRA holds the event-specific fields.  Period grouping is derived
 from `ts' when statistics are computed, not stored in the events."
   (append
@@ -151,8 +149,9 @@ from `ts' when statistics are computed, not stored in the events."
 
 (defun gptel-permit-analytics--append-line (event-alist)
   "Append EVENT-ALIST to `gptel-permit-analytics-file' as one JSON line.
-Creates the file with 0600 permissions when missing.  Errors are
-caught by the caller (`gptel-permit-analytics--emit')."
+Creates the file with 0600 permissions when missing.  Errors are the
+caller's business: the observer (`gptel-permit-analytics--observe')
+catches them; the audit predicate lets them fail the call closed."
   (let* ((file (expand-file-name gptel-permit-analytics-file))
          (newly-created (not (file-exists-p file))))
     (write-region (concat (json-encode event-alist) "\n")
@@ -160,36 +159,22 @@ caught by the caller (`gptel-permit-analytics--emit')."
     (when newly-created
       (set-file-modes file #o600))))
 
-(defun gptel-permit-analytics--next-id ()
-  "Return the next correlation id, seeding from the existing file.
-The serial continues after the highest id already present in
-`gptel-permit-analytics-file', so ids stay unique across sessions."
-  (unless gptel-permit-analytics--serial-seeded
-    (setq gptel-permit-analytics--serial
-          (cl-reduce
-           #'max
-           (cons 0 (cl-loop
-                    for ev in (gptel-permit-analytics--read-events
-                               (expand-file-name gptel-permit-analytics-file))
-                    for id = (gptel-permit-analytics--event-field ev 'id)
-                    when (numberp id) collect id)))
-          gptel-permit-analytics--serial-seeded t))
-  (cl-incf gptel-permit-analytics--serial))
 
-(defun gptel-permit-analytics--emit-tool-call (tool-call)
-  "Append a tool-call event for TOOL-CALL; return its correlation id."
-  (let ((id (gptel-permit-analytics--next-id)))
-    (cl-destructuring-bind (tool buffer backend model)
-        (gptel-permit-analytics--tool-info tool-call)
-      (gptel-permit-analytics--append-line
-       (gptel-permit-analytics--base-event
-        "tool-call" tool id
-        `((buffer . ,buffer)
-          (backend . ,backend)
-          (model . ,model)
-          (args . ,(gptel-permit-analytics--args-alist
-                    (plist-get tool-call :args)))))))
-    id))
+
+(defun gptel-permit-analytics--emit-tool-call (tool-call id)
+  "Append a tool-call event for TOOL-CALL with tool-call ID.
+The id is minted by the rule engine (`gptel-permit--mint-tool-call-id');
+the analytics module allocates no ids of its own."
+  (cl-destructuring-bind (tool buffer backend model)
+      (gptel-permit-analytics--tool-info tool-call)
+    (gptel-permit-analytics--append-line
+     (gptel-permit-analytics--base-event
+      "tool-call" tool id
+      `((buffer . ,buffer)
+        (backend . ,backend)
+        (model . ,model)
+        (args . ,(gptel-permit-analytics--args-alist
+                  (plist-get tool-call :args))))))))
 
 (defun gptel-permit-analytics--emit-rule-match (tool-call id action)
   "Append a rule-match event when a rule with ACTION matched TOOL-CALL."
@@ -214,7 +199,7 @@ variables (see `gptel-permit-judge')."
       (judge-rationale . ,(or gptel-permit--last-judge-rationale "")))))
 
 (defun gptel-permit-analytics--emit-verdict (tool-call id action verdict)
-  "Append a verdict event for TOOL-CALL with correlation ID.
+  "Append a verdict event for TOOL-CALL with tool-call ID.
 ACTION is the matched rule's action symbol (nil when no rule matched)
 and VERDICT is the verdict plist computed from it."
   (when id
@@ -263,7 +248,7 @@ buffer.  Returns (ID . CONFIRM-TIME) or nil."
         head))))
 
 (defun gptel-permit-analytics--emit-confirm (tool-call id)
-  "Append a confirm event for TOOL-CALL (correlation ID) and enqueue
+  "Append a confirm event for TOOL-CALL (tool-call ID) and enqueue
 the pending confirmation used to correlate the later decision."
   (when id
     (cl-destructuring-bind (_tool buffer _backend _model)
@@ -284,7 +269,7 @@ the pending confirmation used to correlate the later decision."
       `((rate . ,gptel-permit-analytics-sample-rate))))))
 
 (defun gptel-permit-analytics--emit-decision (tool id wait-ms choice)
-  "Append a decision event for TOOL with correlation ID.
+  "Append a decision event for TOOL with tool-call ID.
 WAIT-MS is the milliseconds between the confirm event and this
 decision, or nil when the decision could not be correlated."
   (gptel-permit-analytics--append-line
@@ -293,16 +278,19 @@ decision, or nil when the decision could not be correlated."
     `((choice . ,choice)
       ,@(when wait-ms `((wait-ms . ,wait-ms)))))))
 
-(defun gptel-permit-analytics--emit (type tool-call &optional id payload)
-  "Emit analytics event TYPE for TOOL-CALL with correlation ID.
-PAYLOAD is the matched rule's action for :rule-match and the
-(ACTION . VERDICT) of the decision for :verdict.  Inert unless
-analytics is active.  Never signals: analytics failures are logged and
-never propagate into the permission hook."
+(defun gptel-permit-analytics--observe (id tool-call type payload)
+  "Adapter from `gptel-permit-events-functions' to the event emitters.
+Receives the uniform engine callback signature: the tool-call id,
+the enriched TOOL-CALL, the event TYPE (:tool-call, :rule-match, :verdict
+or :confirm) and the event PAYLOAD (nil, the matched action symbol,
+(ACTION . VERDICT) or nil respectively).  Inert unless analytics is
+active.  Never signals: analytics failures are logged and never
+propagate into the permission hook (the core also isolates observers
+per function — belt and braces)."
   (when (gptel-permit-analytics--active-p)
     (condition-case err
         (pcase type
-          (:tool-call  (gptel-permit-analytics--emit-tool-call tool-call))
+          (:tool-call  (gptel-permit-analytics--emit-tool-call tool-call id))
           (:rule-match (gptel-permit-analytics--emit-rule-match
                         tool-call id payload))
           (:verdict    (gptel-permit-analytics--emit-verdict
@@ -319,21 +307,19 @@ successful sandbox); such verdicts may be audited by sampling."
        (null (plist-get verdict :confirm))
        (not (plist-get verdict :block))))
 
-(defun gptel-permit-analytics--maybe-sample (verdict tool-call id)
-  "Return VERDICT, possibly upgraded to a forced confirmation.
-Sampling applies only to automation-allow verdicts, never to blocks,
-and only while analytics is active.  A sampled verdict emits an audit
-event and keeps any args rewrite, so a confirmed call still runs
-sandboxed."
-  (if (and (gptel-permit-analytics--active-p)
-           (gptel-permit-analytics--automation-allow-p verdict)
-           (< (random 100) (* gptel-permit-analytics-sample-rate 100)))
-      (progn
-        (gptel-permit-analytics--emit-audit tool-call id)
-        (if (plist-get verdict :args)
-            (list :confirm t :args (plist-get verdict :args))
-          (list :confirm t)))
-    verdict))
+(defun gptel-permit-analytics--audit-p (id tool-call verdict)
+  "Audit predicate on `gptel-permit-veto-functions'.
+Return non-nil when VERDICT is an automation allow selected for audit
+sampling; the rule engine then upgrades the verdict to (:confirm t),
+preserving any args rewrite.  Emits the audit event itself when a call
+is selected.  Sampling applies only to automation-allow verdicts,
+never to blocks, and only while analytics is active.  Errors are not
+caught: they propagate into the permission hook and fail the call
+closed, exactly as sampling errors did before this rode the veto hook."
+  (and (gptel-permit-analytics--active-p)
+       (gptel-permit-analytics--automation-allow-p verdict)
+       (< (random 100) (* gptel-permit-analytics-sample-rate 100))
+       (progn (gptel-permit-analytics--emit-audit tool-call id) t)))
 
 (defun gptel-permit-analytics--record-decision (choice tool-calls ov)
   "Record decision events for CHOICE resolving the pending TOOL-CALLS.
@@ -386,9 +372,11 @@ Idempotent.  Intended for a `use-package' :config section:
 
 This installs :before advice on the gptel internals
 `gptel--accept-tool-calls', `gptel--reject-tool-calls' and
-`gptel--steer-tool-calls' (fragile across gptel releases) and sets
-`gptel-permit-analytics-enabled' to t.  Undo with
-`gptel-permit-unregister-analytics-hooks'."
+`gptel--steer-tool-calls' (fragile across gptel releases), adds the
+event observer to `gptel-permit-events-functions' and the audit
+predicate to `gptel-permit-veto-functions' (the core calls no analytics
+functions by name), and sets `gptel-permit-analytics-enabled' to t.
+Undo with `gptel-permit-unregister-analytics-hooks'."
   (interactive)
   (advice-add 'gptel--accept-tool-calls :before
               #'gptel-permit-analytics--advice-accept)
@@ -396,12 +384,17 @@ This installs :before advice on the gptel internals
               #'gptel-permit-analytics--advice-reject)
   (advice-add 'gptel--steer-tool-calls :before
               #'gptel-permit-analytics--advice-steer)
+  (add-hook 'gptel-permit-events-functions
+            #'gptel-permit-analytics--observe)
+  (add-hook 'gptel-permit-veto-functions
+            #'gptel-permit-analytics--audit-p)
   (setq gptel-permit-analytics--registered t
         gptel-permit-analytics-enabled t))
 
 (defun gptel-permit-unregister-analytics-hooks ()
   "Remove analytics decision-capture advice and disable capture.
-Restores the inert state: no advice, no events, no audit sampling."
+Restores the inert state: no advice, no hook functions, no events, no
+audit sampling."
   (interactive)
   (advice-remove 'gptel--accept-tool-calls
                  #'gptel-permit-analytics--advice-accept)
@@ -409,6 +402,10 @@ Restores the inert state: no advice, no events, no audit sampling."
                  #'gptel-permit-analytics--advice-reject)
   (advice-remove 'gptel--steer-tool-calls
                  #'gptel-permit-analytics--advice-steer)
+  (remove-hook 'gptel-permit-events-functions
+               #'gptel-permit-analytics--observe)
+  (remove-hook 'gptel-permit-veto-functions
+               #'gptel-permit-analytics--audit-p)
   (setq gptel-permit-analytics--registered nil
         gptel-permit-analytics-enabled nil
         gptel-permit-analytics--pending nil))
@@ -451,12 +448,14 @@ Returns nil when FILE is missing."
 (defun gptel-permit-analytics--outcome-table (events)
   "Fold EVENTS into a hash table of per-call outcome plists keyed by id.
 Each row's period fields are derived from the call's first event's
-`ts' — events carry no period fields of their own."
-  (let ((table (make-hash-table :test 'eql)))
+`ts' — events carry no period fields of their own.  Ids are strings
+(TIMESTAMP.PID.SERIAL, minted by the rule engine); historical files
+carry integer ids.  Both fold identically under `equal' semantics."
+  (let ((table (make-hash-table :test 'equal)))
     (dolist (event events table)
       (let ((id (gptel-permit-analytics--event-field event 'id))
             (type (gptel-permit-analytics--event-field event 'type)))
-        (when (numberp id)
+        (when id
           (let ((row (or (gethash id table)
                          (puthash id
                                   (nconc
@@ -554,8 +553,11 @@ was cancel or steer."
                                        (lambda (r) (plist-get r :block)) rs))))))
 
 (defun gptel-permit-analytics--auto-allowed-p (row)
-  "Return non-nil if outcome ROW is an un-sampled automation allow."
-  (and (member (plist-get row :action) '("allow" "sandbox"))
+  "Return non-nil if outcome ROW is an un-sampled automation allow.
+Structural test, no action-name list to keep in sync: a matched action
+other than \"none\", not asked, not blocked."
+  (and (plist-get row :action)
+       (not (equal (plist-get row :action) "none"))
        (not (plist-get row :asked))
        (not (plist-get row :block))))
 

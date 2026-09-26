@@ -18,17 +18,27 @@
           (make-temp-name "gptel-permit-analytics-test-") ".jsonl"))
 
 (defmacro gptel-permit-analytics-test--with-file (&rest body)
-  "Run BODY against a fresh analytics file path with pristine state."
+  "Run BODY against a fresh analytics file path with pristine state.
+Installs the analytics observer and audit predicate on the core engine
+hooks for the duration of BODY (as registration would) and removes
+them afterwards; BODY activates capture itself by setting the
+registered/enabled flags or calling the register function."
   (declare (indent 0))
   `(let ((gptel-permit-analytics-file (gptel-permit-analytics-test--fresh-file))
          (gptel-permit-analytics-sample-rate 0.2)
          (gptel-permit-analytics-enabled nil)
          (gptel-permit-analytics--registered nil)
-         (gptel-permit-analytics--serial 0)
-         (gptel-permit-analytics--serial-seeded nil)
          (gptel-permit-analytics--pending nil))
+     (add-hook 'gptel-permit-events-functions
+               #'gptel-permit-analytics--observe)
+     (add-hook 'gptel-permit-veto-functions
+               #'gptel-permit-analytics--audit-p)
      (unwind-protect
          (progn ,@body)
+       (remove-hook 'gptel-permit-events-functions
+                    #'gptel-permit-analytics--observe)
+       (remove-hook 'gptel-permit-veto-functions
+                    #'gptel-permit-analytics--audit-p)
        (gptel-permit-unregister-analytics-hooks)
        (when (and gptel-permit-analytics-file
                   (file-exists-p gptel-permit-analytics-file))
@@ -131,7 +141,8 @@ sharing one id, with monotonic timestamps."
            (ids (cl-delete-duplicates
                  (mapcar (lambda (e)
                            (gptel-permit-analytics-test--field e 'id))
-                         events))))
+                         events)
+                 :test #'equal)))
       (should (equal types '("tool-call" "rule-match" "verdict" "confirm")))
       (should (equal (length ids) 1))
       (should (equal (gptel-permit-analytics-test--field (nth 0 events) 'tool)
@@ -174,8 +185,9 @@ sharing one id, with monotonic timestamps."
     (should (= (logand (file-modes gptel-permit-analytics-file) #o777)
                #o600))))
 
-(ert-deftest gptel-permit-analytics-ids-continue-after-existing-file ()
-  "The id serial continues after the ids already present in the file."
+(ert-deftest gptel-permit-analytics-ids-are-core-minted-strings ()
+  "Ids come from the core as strings, independent of any file seeding;
+all events of one call share the id."
   (gptel-permit-analytics-test--with-file
     (with-temp-file gptel-permit-analytics-file
       (insert "{\"id\":3,\"ts\":\"x\",\"type\":\"tool-call\"}\n"))
@@ -186,12 +198,26 @@ sharing one id, with monotonic timestamps."
       (cl-letf (((symbol-function 'random)
                  (lambda (_n) (error "random must not be called"))))
         (gptel-permit--apply-rules (list :name "Bash" :args '(:command "ls")))))
-    ;; All new chain events continue after the pre-existing id 3.
-    (should (equal (mapcar (lambda (e)
-                             (gptel-permit-analytics-test--field e 'id))
-                           (gptel-permit-analytics-test--events
-                            gptel-permit-analytics-file))
-                   '(3 4 4 4)))))
+    ;; The new chain's events carry one fresh string id, distinct from
+    ;; any id in the pre-existing file — no seeding, no coordination.
+    (let* ((events (gptel-permit-analytics-test--events
+                    gptel-permit-analytics-file))
+           (new-events (cl-remove-if
+                        (lambda (e)
+                          (eq (gptel-permit-analytics-test--field e 'id) 3))
+                        events))
+           (ids (cl-delete-duplicates
+                 (mapcar (lambda (e)
+                           (gptel-permit-analytics-test--field e 'id))
+                         new-events)
+                 :test #'equal)))
+      (should (= 3 (length new-events)))
+      (should (= 1 (length ids)))
+      (should (stringp (car ids)))
+      (should (string-match-p
+               (rx bos (= 8 digit) "T" (= 6 digit) "." (= 3 digit)
+                   "." (+ digit) "." (+ digit) eos)
+               (car ids))))))
 
 ;; -------------------------------------------------------------------
 ;; Decision capture
@@ -256,7 +282,8 @@ sharing one id, with monotonic timestamps."
                                (gptel-permit-analytics-test--field e 'choice))
                              decisions)
                      '("cancel" "steer")))
-      (should (cl-every #'numberp
+      ;; Decisions share the chain's core-minted string id.
+      (should (cl-every #'stringp
                         (mapcar (lambda (e)
                                   (gptel-permit-analytics-test--field e 'id))
                                 decisions))))))
@@ -381,8 +408,8 @@ runs sandboxed."
 ;; -------------------------------------------------------------------
 
 (ert-deftest gptel-permit-analytics-register-unregister ()
-  "Registration installs advice and enables capture; unregister removes
-everything; both are idempotent."
+  "Registration installs advice and the two core hook functions;
+unregister removes everything; both are idempotent."
   (gptel-permit-analytics-test--with-file
     (gptel-permit-register-analytics-hooks)
     (gptel-permit-register-analytics-hooks)
@@ -398,6 +425,12 @@ everything; both are idempotent."
                              'gptel--reject-tool-calls))
     (should (advice-member-p #'gptel-permit-analytics--advice-steer
                              'gptel--steer-tool-calls))
+    ;; The core engine hooks carry the observer and the audit predicate,
+    ;; exactly once.
+    (should (= 1 (cl-count #'gptel-permit-analytics--observe
+                            gptel-permit-events-functions)))
+    (should (= 1 (cl-count #'gptel-permit-analytics--audit-p
+                           gptel-permit-veto-functions)))
     (gptel-permit-unregister-analytics-hooks)
     (should-not gptel-permit-analytics-enabled)
     (should-not (advice-member-p #'gptel-permit-analytics--advice-accept
@@ -406,6 +439,10 @@ everything; both are idempotent."
                                  'gptel--reject-tool-calls))
     (should-not (advice-member-p #'gptel-permit-analytics--advice-steer
                                  'gptel--steer-tool-calls))
+    (should-not (memq #'gptel-permit-analytics--observe
+                      gptel-permit-events-functions))
+    (should-not (memq #'gptel-permit-analytics--audit-p
+                      gptel-permit-veto-functions))
     ;; Unregistering twice is harmless.
     (gptel-permit-unregister-analytics-hooks)))
 
@@ -562,6 +599,50 @@ from `ts'."
     (should (= (plist-get stats :total-calls) 0))
     (should (= (plist-get stats :asked) 0))
     (should (= (plist-get (plist-get stats :false-allow) :audited) 0))))
+
+(defun gptel-permit-analytics-test--emit-fixture (file id type tool &rest fields)
+  "Append one JSON fixture line to FILE with ID, TYPE, TOOL and FIELDS."
+  (with-temp-buffer
+    (insert (json-encode
+             `((id . ,id) (ts . "2026-09-14T12:00:00.000+0000")
+               (type . ,type) (tool . ,tool) ,@fields))
+            "\n")
+    (append-to-file (point-min) (point-max) file)))
+
+(ert-deftest gptel-permit-analytics-compute-mixed-legacy-and-string-ids ()
+  "A log containing integer-id (legacy) and string-id (new) chains
+folds every chain into one outcome row, both shapes counted the same."
+  (let* ((file (gptel-permit-analytics-test--fresh-file))
+         (stats (unwind-protect
+                    (progn
+                      ;; Legacy chain with an integer id: audited allow,
+                      ;; cancelled by the user.
+                      (gptel-permit-analytics-test--emit-fixture
+                       file 1 "tool-call" "Bash")
+                      (gptel-permit-analytics-test--emit-fixture
+                       file 1 "verdict" "Bash" '(action . "allow"))
+                      (gptel-permit-analytics-test--emit-fixture
+                       file 1 "audit" "Bash" '(rate . 0.2))
+                      (gptel-permit-analytics-test--emit-fixture
+                       file 1 "confirm" "Bash")
+                      (gptel-permit-analytics-test--emit-fixture
+                       file 1 "decision" "Bash"
+                       '(choice . "cancel") '(wait-ms . 100))
+                      ;; New chain with a string id: un-sampled allow.
+                      (gptel-permit-analytics-test--emit-fixture
+                       file "20260914T120000.000.123.5" "tool-call" "Bash")
+                      (gptel-permit-analytics-test--emit-fixture
+                       file "20260914T120000.000.123.5" "verdict" "Bash"
+                       '(action . "allow"))
+                      (gptel-permit-analytics-compute file))
+                  (delete-file file))))
+    (should (= (plist-get stats :total-calls) 2))
+    (should (= (plist-get stats :auto-allowed) 1))
+    (should (= (plist-get stats :asked) 1))
+    (should (= (plist-get stats :blocked) 0))
+    (should (= (plist-get (plist-get stats :false-allow) :audited) 1))
+    (should (= (plist-get (plist-get stats :false-allow) :overridden) 1))))
+
 
 (ert-deftest gptel-permit-analytics-report-renders-buffer ()
   "The report renders the computed statistics into a buffer."

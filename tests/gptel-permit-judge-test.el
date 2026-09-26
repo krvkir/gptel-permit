@@ -482,12 +482,16 @@ what you want, or use an unrecognized backend (nil derivation)."
                   :action allow)
            (:tool "Bash" :action ask))))
     (gptel-permit-judge-test--with-request "SAFE\nlocal only"
-      (should (equal (gptel-permit--rule-action
-                      (gptel-permit--enrich-tool-call (list :name "Bash" :args '(:command "ls ./src"))))
+      (should (equal (gptel-permit--find-action
+                      "test-id"
+                      (gptel-permit--enrich-tool-call
+                       (list :name "Bash" :args '(:command "ls ./src"))))
                      'allow)))
     (gptel-permit-judge-test--with-request "UNSAFE\nsystem-wide"
-      (should (equal (gptel-permit--rule-action
-                      (gptel-permit--enrich-tool-call (list :name "Bash" :args '(:command "apt install x"))))
+      (should (equal (gptel-permit--find-action
+                      "test-id"
+                      (gptel-permit--enrich-tool-call
+                       (list :name "Bash" :args '(:command "apt install x"))))
                      'ask)))))
 
 (ert-deftest gptel-permit-judge-payload-isolated-from-session-system-prompt ()
@@ -516,6 +520,17 @@ never reaches the judge payload; derived thinking-off params do."
         (should (cl-some (lambda (m) (string= (plist-get m :role) "user"))
                          messages))
         (should (equal (plist-get data :think) :json-false))))))
+
+;; -------------------------------------------------------------------
+;; Self-registration at load: per-call state lifecycle
+;; -------------------------------------------------------------------
+
+(ert-deftest gptel-permit-judge-load-registers-reset-state ()
+  "Requiring the module adds its state reset to the engine's lifecycle
+hook, so the core needs no judge knowledge."
+  (should (memq #'gptel-permit-judge--reset-state
+                gptel-permit-before-rule-match-functions)))
+
 
 
 (provide 'gptel-permit-judge-test)

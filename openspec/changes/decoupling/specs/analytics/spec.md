@@ -34,7 +34,7 @@ Analytics events SHALL be appended as one JSON object per line to
 `gptel-permit-analytics-file` (JSONL, append-only; created with 0600
 permissions). Every event SHALL carry the common fields:
 
-- `id`: string correlation id minted by the rule engine as
+- `id`: string tool-call id minted by the rule engine as
   `TIMESTAMP.PID.SERIAL` — all events for one tool call share the id, and
   ids are unique across sessions and concurrent Emacs processes without
   coordination or file seeding. Records written before this change carry

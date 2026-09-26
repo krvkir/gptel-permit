@@ -45,8 +45,8 @@ prompt flash if it proves annoying in practice.
 - Callback resolution: the verdict's ON-SAFE/ON-UNSAFE action is applied to
   the pending-confirmation pack — programmatically only when every pending
   call in the pack is judge-gated and all resolutions are uniform:
-  all accept-class (allow, sandbox with args rewritten through the sandbox
-  adapter registry) → the pack is accepted; all `deny` → the pack is
+  all accept-class (allow, sandbox with args rewritten through the
+  action-registry sandbox handler) → the pack is accepted; all `deny` → the pack is
   rejected with the judge rationales fed back to the model. Any mixture,
   any `ask` resolution, any non-judged call, or audit-sampled call → the
   prompt stays for the human (fail-closed by inaction).
@@ -78,10 +78,12 @@ prompt flash if it proves annoying in practice.
 ## Impact
 
 - Code: `gptel-permit-judge.el` (async request path, callback resolution,
-  watchdog, indicator), `gptel-permit.el` (judge action dispatch in
-  `--apply-rules`), `gptel-permit-analytics.el` (judge-verdict events,
-  programmatic decision choices, sampling suppression, action
-  serialization), README.
+  watchdog, indicator, and the `judge` action handler registered in
+  `gptel-permit-action-handlers`), `gptel-permit.el` (list-form action
+  dispatch only — a cons action looks up its car in the action registry;
+  no judge knowledge in the core), `gptel-permit-analytics.el`
+  (judge-verdict events, programmatic decision choices, sampling
+  suppression, action serialization), README.
 - Hook pipeline: `gptel-pre-tool-call-functions` contract unchanged —
   async mode just returns `(:confirm t)`; all gptel interaction happens via
   the documented pending-confirmation overlay (`gptel--accept-tool-calls`
@@ -89,7 +91,11 @@ prompt flash if it proves annoying in practice.
   result callback with the block reason and cleans up, mirroring gptel's
   steer path).
 - Dependencies: builds on `judge-logging-thinking` (failure classes,
-  `gptel-permit-judge-request-params`) and `sandbox-backend-registry`
-  (adapter registry for `(judge … sandbox)` resolutions); must be
-  implemented after both. The optional `judge-async-defer` change later
-  adds a prompt-free parking mode without changing the rule DSL.
+  `gptel-permit-judge-request-params`), `decoupling` (the action registry:
+  the judge action is a handler with the `(ID TOOL-CALL)` signature, and
+  audit sampling rides the engine's veto hook), and
+  `sandbox-backend-registry` (the sandbox *tool-adapter* registry for
+  `(judge … sandbox)` resolutions, wrapped inside the sandbox action
+  handler); must be implemented after all three. The optional
+  `judge-async-defer` change later adds a prompt-free parking mode without
+  changing the rule DSL.

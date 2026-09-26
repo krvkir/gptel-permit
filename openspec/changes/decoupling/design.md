@@ -12,7 +12,7 @@
 - **Judge**: the core declares the judge's state vars (bare `defvar`s) and
   owns `gptel-permit--reset-judge-state`, called each call so a stale
   judgement cannot leak into the next call's analytics verdict event.
-- **Analytics**: correlation ids are minted by the *analytics* module
+- **Analytics**: tool-call ids are minted by the *analytics* module
   (`--next-id`, an integer serial seeded by scanning the log file for its
   maximum id) and returned to the core via a `:tool-call` notification; the
   core calls `--analytics-notify` four times per call and `--analytics-sample`
@@ -81,7 +81,7 @@ this change it registers a handler instead — see tasks).
    Built-in handlers ignore the id.
 
 4. **Core-minted string ids: `TIMESTAMP.PID.SERIAL`.**
-   `gptel-permit--mint-id` returns e.g. `"20261005T143022.123.4242.42"`
+   `gptel-permit--mint-tool-call-id` returns e.g. `"20261005T143022.123.4242.42"`
    (local time, millisecond precision; `emacs-pid`; process-wide serial).
    Uniqueness: within a session by the serial; across concurrent Emacs
    processes by the pid; across restarts by the timestamp (a pid can be
@@ -99,7 +99,7 @@ this change it registers a handler instead — see tasks).
 
 5. **Observation hook with per-function error isolation in the core.**
    `gptel-permit-events-functions` is run by a core helper
-   (`--run-events`) that wraps *each* function in `condition-case`, logs,
+   (`--emit-event`) that wraps *each* function in `condition-case`, logs,
    and continues. Observers must never change a verdict; a broken logger
    must not turn an `allow` into a prompt storm. Analytics keeps its own
    wrapper too (as `--emit` has today) — belt and braces.
@@ -183,7 +183,7 @@ Mechanics, per module. Pseudocode elided as `;; …unchanged…`.
     (deny  . gptel-permit--action-deny)
     (ask   . gptel-permit--action-ask))
   "Alist mapping rule action symbols to handler functions.
-A handler is called with (ID TOOL-CALL) — the decision correlation id
+A handler is called with (ID TOOL-CALL) — the tool-call id
 and the enriched tool call — and returns a verdict plist per
 `gptel-pre-tool-call-functions', or nil to defer.  Modules add entries
 at load time, e.g. the sandbox module adds
@@ -195,21 +195,21 @@ registered handler fails closed: see `gptel-permit--apply-rules'.")
 (defun gptel-permit--action-ask   (_id _tool-call) (list :confirm t))
 ```
 
-### Core — ids and hooks
+### Core — tool-call ids and hooks
 
 ```elisp
-(defvar gptel-permit--decision-serial 0
-  "Serial component of decision ids minted in this Emacs session.")
+(defvar gptel-permit--tool-call-serial 0
+  "Serial component of tool-call ids minted in this Emacs session.")
 
-(defun gptel-permit--mint-id ()
-  "Return a fresh decision correlation id (a string).
+(defun gptel-permit--mint-tool-call-id ()
+  "Return a fresh tool-call id (a string).
 Format TIMESTAMP.PID.SERIAL — unique across sessions (timestamp,
 millisecond precision), concurrent Emacs processes (pid) and calls
 within a process (serial), without any coordination."
   (format "%s.%d.%d"
           (format-time-string "%Y%m%dT%H%M%S.%3N")
           (emacs-pid)
-          (cl-incf gptel-permit--decision-serial)))
+          (cl-incf gptel-permit--tool-call-serial)))
 
 (defvar gptel-permit-before-rule-match-functions nil
   "Abnormal hook run once per tool call before rule matching.
@@ -233,27 +233,32 @@ non-nil return upgrades the verdict to (:confirm t), preserving any
 :args rewrite.  Veto functions inspect VERDICT and can only veto; they
 never return modified verdicts.  Errors fail closed.")
 
-(defun gptel-permit--run-events (id tool-call type payload)
-  "Run observers on `gptel-permit-events-functions', isolating errors."
+(defun gptel-permit--emit-event (id tool-call type payload)
+  "Emit an engine event (ID TOOL-CALL TYPE PAYLOAD).
+Delivery to the observers on `gptel-permit-events-functions' is an
+implementation detail of no concern to the caller: each observer runs
+isolated in `condition-case', an erroring observer is logged and
+skipped, and later observers still run.  Never signals; observers can
+never alter a verdict."
   (dolist (fn gptel-permit-events-functions)
     (condition-case err
         (funcall fn id tool-call type payload)
-      (error (gptel-permit--log "Decision observer %S failed: %S" fn err)))))
+      (error (gptel-permit--log "Event observer %S failed: %S" fn err)))))
 ```
 
 ### Core — matcher (renamed) and the verdict chain
 
 ```elisp
-(defun gptel-permit--find-action (tool-call id)
+(defun gptel-permit--find-action (id tool-call)
   "Return the action of the first rule matching TOOL-CALL, or nil.
 Renamed from `gptel-permit--rule-action'.  Emits a :rule-match
 event at the moment the match is decided."
   (catch 'found
     (dolist (rule (append gptel-permit-rules gptel-permit-global-rules))
       (when-let* ((action (gptel-permit--match-rule-p rule tool-call)))
-        (gptel-permit--run-events id tool-call :rule-match action)
+        (gptel-permit--emit-event id tool-call :rule-match action)
         (throw 'found action)))
-    (gptel-permit--run-events id tool-call :rule-match nil)
+    (gptel-permit--emit-event id tool-call :rule-match nil)
     nil))
 
 (defun gptel-permit--apply-rules (tool-call)
@@ -265,12 +270,12 @@ On unexpected error, fail closed with (:confirm t)."
   (condition-case err
       (unless (gptel-permit--processed-p tool-call)
         (let* ((enriched (gptel-permit--enrich-tool-call tool-call))
-               (id (gptel-permit--mint-id)))
+               (id (gptel-permit--mint-tool-call-id)))
           (gptel-permit--log "Started rule checks …") ;; …unchanged…
-          (gptel-permit--run-events id enriched :tool-call nil)
+          (gptel-permit--emit-event id enriched :tool-call nil)
           (run-hook-with-args
            'gptel-permit-before-rule-match-functions id enriched)
-          (let* ((action (gptel-permit--find-action enriched id))
+          (let* ((action (gptel-permit--find-action id enriched))
                  (handler (and action
                                (cdr (assq action
                                           gptel-permit-action-handlers))))
@@ -282,7 +287,7 @@ On unexpected error, fail closed with (:confirm t)."
                             action)
                            (list :confirm t)))))
             (gptel-permit--log "Verdict: %s" (or action "none (fallback)"))
-            (gptel-permit--run-events
+            (gptel-permit--emit-event
              id enriched :verdict (cons action verdict))
             (when (and action
                        (run-hook-with-args-until-success
@@ -292,7 +297,7 @@ On unexpected error, fail closed with (:confirm t)."
                         (list :confirm t :args (plist-get verdict :args))
                       (list :confirm t))))
             (when (and (consp verdict) (plist-get verdict :confirm))
-              (gptel-permit--run-events id enriched :confirm nil))
+              (gptel-permit--emit-event id enriched :confirm nil))
             verdict)))
     (error
      (gptel-permit--log "Error in --apply-rules: %S — failing closed" err)
@@ -362,7 +367,7 @@ did through `gptel-permit-analytics--maybe-sample'."
 
 ;; --emit-tool-call gains an ID parameter (no longer mints):
 (defun gptel-permit-analytics--emit-tool-call (tool-call id)
-  "Append a tool-call event for TOOL-CALL with correlation ID."
+  "Append a tool-call event for TOOL-CALL with tool-call ID."
   ;; …unchanged apart from dropping (gptel-permit-analytics--next-id)…
   )
 
@@ -408,7 +413,7 @@ gate `numberp` → non-nil; `--auto-allowed-p` structural (action ≠
 Fully additive for users' *rules*: rule plists, both rule lists, and all
 defcustoms keep working; the defcustom widget change is cosmetic. Behavior
 changes: unknown action values now prompt instead of deferring (hardening);
-correlation ids become strings (old logs remain valid). Internal renames
+tool-call ids become strings (old logs remain valid). Internal renames
 (`--rule-action`, `--next-id`, `--maybe-sample`, …) have no aliases —
 grep-clean in-repo. Rollback: revert the commits; no persistent state.
 
