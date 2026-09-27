@@ -80,6 +80,193 @@ registered/enabled flags or calling the register function."
 ;; Off by default
 ;; -------------------------------------------------------------------
 
+;; -------------------------------------------------------------------
+;; Judge action integration (judge-verdict events, programmatic
+;; decisions, resolution-time audit sampling, action serialization)
+;; -------------------------------------------------------------------
+
+(defvar gptel-permit-analytics-test--async-callback nil)
+
+(defmacro gptel-permit-analytics-test--with-async-judge (&rest body)
+  "Run BODY with the judge's request stubbed to capture its callback."
+  (declare (indent 0))
+  `(let ((gptel-permit-analytics-test--async-callback nil))
+     (cl-letf (((symbol-function 'gptel-request)
+                (lambda (_prompt &rest keys)
+                  (setq gptel-permit-analytics-test--async-callback
+                        (plist-get keys :callback))
+                  nil))
+               ((symbol-function 'gptel-get-backend)
+                (lambda (_name) 'fake-judge-backend)))
+       ,@body)))
+
+(ert-deftest gptel-permit-analytics-judge-action-string-serializes ()
+  "List-form judge actions serialize distinctly."
+  (should (equal (gptel-permit-analytics--action-string '(judge sandbox deny))
+                 "judge:sandbox/deny"))
+  (should (equal (gptel-permit-analytics--action-string 'judge) "judge"))
+  (should (equal (gptel-permit-analytics--action-string '(judge)) "judge"))
+  (should (equal (gptel-permit-analytics--action-string nil) "none")))
+
+(ert-deftest gptel-permit-analytics-async-safe-chain-one-id ()
+  "Async SAFE: all events share the call's id."
+  (gptel-permit-analytics-test--with-file
+    (let ((gptel-permit-analytics--registered t)
+          (gptel-permit-analytics-enabled t)
+          (gptel-permit-judge-backend "stub")
+          (gptel-permit-judge-async t)
+          (gptel-permit-judge-timeout 60)
+          (gptel-permit-rules '((:tool "Bash" :action judge)))
+          (gptel-permit-global-rules nil)
+          ;; The veto hook is global: another test file may have left
+          ;; functions on it — start from a known state.
+          (gptel-permit-veto-functions
+           (list #'gptel-permit-analytics--audit-p))
+          (accepted nil))
+      (with-temp-buffer
+        (let* ((spec (gptel--make-tool-internal
+                      :name "Bash" :function #'ignore :description "t"))
+               (triple (list spec '(:command "ls") (lambda (_))))
+               (ov (make-overlay (point-min) (point-min)))
+               (prompt-ov (make-overlay (point-min) (point-min))))
+          (overlay-put ov 'gptel-tool (list triple))
+          (overlay-put ov 'prompt (list prompt-ov))
+          (gptel-permit-analytics-test--with-async-judge
+            (cl-letf (((symbol-function 'gptel--accept-tool-calls)
+                       (lambda (_tc _ov) (setq accepted t))))
+              (should (equal (gptel-permit--apply-rules
+                              (list :name "Bash" :args '(:command "ls")
+                                    :buffer (buffer-name)))
+                             '(:confirm t)))
+              (funcall gptel-permit-analytics-test--async-callback
+                       "SAFE\nfine" nil)
+              (should accepted)))))
+      (let* ((events (gptel-permit-analytics-test--events
+                      gptel-permit-analytics-file))
+             (types (mapcar (lambda (e)
+                              (gptel-permit-analytics-test--field e 'type))
+                            events))
+             (ids (delete-dups
+                   (mapcar (lambda (e)
+                             (gptel-permit-analytics-test--field e 'id))
+                           events))))
+        (should (equal types '("tool-call" "rule-match" "verdict" "confirm"
+                               "judge-verdict" "decision")))
+        (should (= (length ids) 1))
+        (let ((jv (nth 4 events))
+              (dec (nth 5 events)))
+          (should (equal (gptel-permit-analytics-test--field jv 'judge-verdict)
+                         "safe"))
+          (should (equal (gptel-permit-analytics-test--field jv 'judge-rationale)
+                         "fine"))
+          (should (numberp (gptel-permit-analytics-test--field
+                            jv 'judge-latency-ms)))
+          (should (equal (gptel-permit-analytics-test--field dec 'choice)
+                         "auto-allow")))))))
+
+(ert-deftest gptel-permit-analytics-async-unsafe-manual-decision ()
+  "Async UNSAFE to ask: judge-verdict records unsafe, the pack stays,
+and the user's later manual decision carries the wait."
+  (gptel-permit-analytics-test--with-file
+    (let ((gptel-permit-analytics--registered t)
+          (gptel-permit-analytics-enabled t)
+          (gptel-permit-judge-backend "stub")
+          (gptel-permit-judge-async t)
+          (gptel-permit-judge-timeout 60)
+          (gptel-permit-rules '((:tool "Bash" :action judge)))
+          (gptel-permit-global-rules nil)
+          (gptel-permit-veto-functions
+           (list #'gptel-permit-analytics--audit-p))
+          (accepted nil))
+      (with-temp-buffer
+        (let* ((spec (gptel--make-tool-internal
+                      :name "Bash" :function #'ignore :description "t"))
+               (triple (list spec '(:command "rm -rf /") (lambda (_))))
+               (ov (make-overlay (point-min) (point-min)))
+               (prompt-ov (make-overlay (point-min) (point-min))))
+          (overlay-put ov 'gptel-tool (list triple))
+          (overlay-put ov 'prompt (list prompt-ov))
+          (gptel-permit-analytics-test--with-async-judge
+            (cl-letf (((symbol-function 'gptel--accept-tool-calls)
+                       (lambda (_tc _ov) (setq accepted t))))
+              (gptel-permit--apply-rules
+               (list :name "Bash" :args '(:command "rm -rf /")
+                     :buffer (buffer-name)))
+              (funcall gptel-permit-analytics-test--async-callback
+                       "UNSAFE\ntouches /etc" nil)
+              (should (overlay-buffer ov))
+              (should-not accepted)
+              ;; The user answers the prompt manually: the advice fires
+              ;; outside any programmatic binding and records "allow".
+              (gptel-permit-analytics--record-decision
+               "allow" (list triple) ov)))))
+      (let* ((events (gptel-permit-analytics-test--events
+                      gptel-permit-analytics-file))
+             (types (mapcar (lambda (e)
+                              (gptel-permit-analytics-test--field e 'type))
+                            events))
+             (jv (cl-find "judge-verdict" events
+                          :key (lambda (e)
+                                 (gptel-permit-analytics-test--field e 'type))
+                          :test #'equal))
+             (dec (cl-find "decision" events
+                           :key (lambda (e)
+                                  (gptel-permit-analytics-test--field e 'type))
+                           :test #'equal)))
+        (should (equal types '("tool-call" "rule-match" "verdict" "confirm"
+                               "judge-verdict" "decision")))
+        (should (equal (gptel-permit-analytics-test--field jv 'judge-verdict)
+                       "unsafe"))
+        (should (equal (gptel-permit-analytics-test--field dec 'choice)
+                       "allow"))
+        (should (numberp (gptel-permit-analytics-test--field dec 'wait-ms)))))))
+
+(ert-deftest gptel-permit-analytics-sampled-judge-never-auto-resolves ()
+  "Sample-rate 1.0: the audit event is emitted, the judge verdict is
+recorded, and the pack stays on the prompt."
+  (gptel-permit-analytics-test--with-file
+    (let ((gptel-permit-analytics--registered t)
+          (gptel-permit-analytics-enabled t)
+          (gptel-permit-analytics-sample-rate 1.0)
+          (gptel-permit-judge-backend "stub")
+          (gptel-permit-judge-async t)
+          (gptel-permit-judge-timeout 60)
+          (gptel-permit-rules '((:tool "Bash" :action judge)))
+          (gptel-permit-global-rules nil)
+          (gptel-permit-veto-functions
+           (list #'gptel-permit-analytics--audit-p))
+          (accepted nil))
+      (with-temp-buffer
+        (let* ((spec (gptel--make-tool-internal
+                      :name "Bash" :function #'ignore :description "t"))
+               (triple (list spec '(:command "ls") (lambda (_))))
+               (ov (make-overlay (point-min) (point-min)))
+               (prompt-ov (make-overlay (point-min) (point-min))))
+          (overlay-put ov 'gptel-tool (list triple))
+          (overlay-put ov 'prompt (list prompt-ov))
+          (gptel-permit-analytics-test--with-async-judge
+            (cl-letf (((symbol-function 'gptel--accept-tool-calls)
+                       (lambda (_tc _ov) (setq accepted t))))
+              (gptel-permit--apply-rules
+               (list :name "Bash" :args '(:command "ls")
+                     :buffer (buffer-name)))
+              (funcall gptel-permit-analytics-test--async-callback
+                       "SAFE\nfine" nil)
+              ;; Sampled: the resolution-time veto forced the manual
+              ;; resolution — no programmatic accept.
+              (should (overlay-buffer ov))
+              (should-not accepted)))))
+      (let* ((events (gptel-permit-analytics-test--events
+                      gptel-permit-analytics-file))
+             (types (mapcar (lambda (e)
+                              (gptel-permit-analytics-test--field e 'type))
+                            events)))
+        (should (member "audit" types))
+        (should (member "judge-verdict" types))
+        (should-not (member "decision" types))))))
+
+
+
 (ert-deftest gptel-permit-analytics-defaults-off ()
   "Analytics is disabled until registered."
   (should (null (default-value 'gptel-permit-analytics-enabled))))

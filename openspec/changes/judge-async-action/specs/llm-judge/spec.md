@@ -18,7 +18,10 @@ ON-SAFE and UNSAFE SHALL apply ON-UNSAFE; a judge evaluation failure
 confirmation. A `deny` resolution SHALL carry a block reason that includes
 the judge's rationale. A malformed judge form (wrong arity or unknown
 action symbol) SHALL be reported with a logged warning and the rule SHALL
-behave as `ask`.
+behave as `ask`. The judge action SHALL judge the call's full argument
+set — every argument of the normalized `:args` alist, formatted as in the
+condition form's prompt construction — rather than any single
+condition-selected value.
 
 #### Scenario: Bare judge accepts on SAFE
 - GIVEN a rule `(:tool "Bash" :conditions ((:command . "^make ")) :action judge)`
@@ -119,10 +122,16 @@ The judge SHALL support an asynchronous request mode for the action form:
 requests SHALL be issued without blocking Emacs, reusing the same prompt
 construction, request isolation, request-params injection, and verdict
 parsing as the synchronous mode, and the verdict SHALL be delivered to a
-callback. Every failure class (`request-fail`, `timeout`, `parse-fail`)
-SHALL be distinguishable and recordable in the asynchronous path exactly
-as in the synchronous path. The judge *condition* form
-(`gptel-permit-judge-safe-p`) SHALL remain synchronous and unchanged.
+callback. gptel MAY fire the callback several times per request: a cons
+`(reasoning . TEXT)` carries leaked reasoning and is followed by the real
+answer, a string is the answer itself, `nil` is a terminal failure, and
+`t` an empty success body. Both request modes SHALL treat only terminal
+deliveries (strings, `nil`, `t`) as verdicts — an intermediate reasoning
+cons SHALL be ignored while the wait continues, and `nil`/`t` SHALL record
+the `request-fail` failure class. Every failure class (`request-fail`,
+`timeout`, `parse-fail`) SHALL be distinguishable and recordable in the
+asynchronous path exactly as in the synchronous path. The judge *condition*
+form (`gptel-permit-judge-safe-p`) SHALL remain synchronous and unchanged.
 
 #### Scenario: Async request does not block
 - WHEN an async judge request is issued
@@ -134,11 +143,26 @@ as in the synchronous path. The judge *condition* form
 - THEN the corresponding failure class is recorded and logged with the
   same lines as the synchronous mode.
 
+#### Scenario: Reasoning delivery does not resolve
+- WHEN gptel delivers a `(reasoning . TEXT)` cons to the async callback
+  before the final string
+- THEN nothing is resolved while the intermediate delivery is processed
+- AND the final string resolves the call normally.
+
+#### Scenario: Empty success body records request-fail
+- WHEN gptel delivers `t` (or `nil`) as the terminal callback delivery
+- THEN `request-fail` is recorded and the resolution is the manual
+  confirmation.
+
 ### Requirement: Judging indicator
 A displayed manual-confirmation prompt SHALL show a judging indicator while
 an asynchronous judge verdict is pending; the indicator
 SHALL be removed when the pack is resolved (programmatically or by the
 user). The indicator SHALL NOT modify the prompt's tool-call contents.
+Because the judge module runs no code on the user's manual paths, the
+indicator's lifetime SHALL additionally be tied to gptel's own cleanup:
+each indicator overlay SHALL be registered as a preview teardown handle
+on its tool overlay, which gptel applies on accept, steer and reject.
 
 #### Scenario: Indicator appears and is removed
 - GIVEN async mode and a judge-gated call whose prompt is displayed
@@ -152,3 +176,9 @@ user). The indicator SHALL NOT modify the prompt's tool-call contents.
 - WHEN the user rejects the prompt before the verdict arrives
 - THEN the indicator is removed with the prompt and the stale verdict is
   discarded.
+
+#### Scenario: Indicator does not outlive a manual accept
+- GIVEN the judging indicator displayed on a prompted pack
+- WHEN the user accepts manually (gptel runs the preview teardown handles)
+- THEN the indicator overlay is removed, with no code of the judge module
+  involved.

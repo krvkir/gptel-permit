@@ -124,6 +124,34 @@ never nil (defer) — an unresolved rule must not auto-run a tool whose
                     (list :name "Bash" :args '(:command "ls")))
                    '(:confirm nil)))))
 
+(ert-deftest gptel-permit-registry-cons-action-passes-cdr ()
+  "A cons action dispatches on its car; the cdr is the handler's third arg."
+  (let* ((seen nil)
+         (handler (lambda (_id _tc form) (setq seen form) '(:confirm nil)))
+         (gptel-permit-action-handlers
+          (cons (cons 'judge handler) gptel-permit-action-handlers))
+         (gptel-permit-rules '((:tool "Bash" :action (judge sandbox deny))))
+         (gptel-permit-global-rules nil))
+    (should (equal (gptel-permit--apply-rules
+                    (list :name "Bash" :args '(:command "ls")))
+                   '(:confirm nil)))
+    (should (equal seen '(sandbox deny)))))
+
+(ert-deftest gptel-permit-registry-cons-action-two-arity-handler-fails-closed ()
+  "A cons action whose handler takes only (ID TOOL-CALL) errors, and the
+engine's error containment fails closed."
+  (let ((gptel-permit-rules '((:tool "Bash" :action (allow with extras))))
+        (gptel-permit-global-rules nil))
+    (should (equal (gptel-permit--apply-rules
+                    (list :name "Bash" :args '(:command "ls")))
+                   '(:confirm t)))))
+
+(ert-deftest gptel-permit-programmatic-call-flag-is-core-owned ()
+  "The programmatic-resolution flag exists with no module and defaults nil."
+  (should (boundp 'gptel-permit--programmatic-call))
+  (should (null gptel-permit--programmatic-call)))
+
+
 ;; -------------------------------------------------------------------
 ;; Before-match hook behavior
 ;; -------------------------------------------------------------------

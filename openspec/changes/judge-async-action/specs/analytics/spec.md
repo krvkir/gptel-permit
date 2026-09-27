@@ -31,7 +31,11 @@ choices distinct from user decisions: an auto-accepted pack SHALL record
 `auto-allow` (not the user's `allow`) and an auto-rejected pack SHALL
 record `deny`. Pending-confirmation entries SHALL be popped with the
 pre-rewrite arguments when the resolution rewrites them (the sandbox
-analytics requirement), so wait times correlate correctly.
+analytics requirement), so wait times correlate correctly. The
+decision-capture advice SHALL treat tool-call approvals made while the
+core's `gptel-permit--programmatic-call` flag is bound non-nil as
+programmatic resolutions and SHALL NOT record them as user decisions; the
+programmatic resolver emits the `decision` event itself.
 
 #### Scenario: Auto-reject is distinguishable
 - GIVEN analytics enabled and an async `(judge sandbox deny)` call
@@ -46,7 +50,13 @@ sampling selects such a call, the judge SHALL still be evaluated and the
 verdict recorded (an `audit` event plus the `judge-verdict` event), but
 the resolution SHALL be the manual confirmation regardless of the verdict
 — a sampled call SHALL never be programmatically accepted or rejected.
-This measures judge false-positives and false-UNSAFE rates alike.
+This measures judge false-positives and false-UNSAFE rates alike. In
+synchronous mode the engine's existing veto consult already covers the
+judge's resolution verdict; in asynchronous mode the resolution callback
+SHALL consult `gptel-permit-veto-functions` with the would-be resolution
+verdict before applying it, and a non-nil veto SHALL force the manual
+resolution. Neither path references any analytics symbol outside the
+analytics module.
 
 #### Scenario: Sampled SAFE does not auto-accept
 - GIVEN analytics enabled, sample-rate 1.0, and an async `judge` call

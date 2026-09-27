@@ -495,6 +495,14 @@ buffer (enable it via =gptel-permit-log-enabled=):
   =gptel-permit-judge-timeout= elapsed, or the wait was interrupted
   with =C-g=.
 
+gptel may fire its request callback more than once: a model whose
+reasoning is captured separately (e.g. an Ollama model with =think=
+enabled) delivers a =(reasoning . …)= cons before the real answer. Both
+judge modes wait through these intermediate deliveries — a thinking
+judge therefore takes its full thinking time before the verdict lands,
+and only a terminal delivery (a string, a failure, or an empty body)
+ends the wait.
+
 Older versions logged every failure as one opaque =Judge verdict: FAIL
 rationale:= line with the raw response discarded. Now each judge run
 records a verdict symbol in =gptel-permit--last-judge-verdict= — one of
@@ -519,6 +527,64 @@ count. An exploratory =UNSAFE= draft followed by a =SAFE= conclusion
 remaining text — is treated as unparseable rather than guessed, and
 an unparseable response is stored and logged in full; all of these
 fall through to the next rule.
+
+** The judge action (async by default)
+
+Besides the condition form, the judge is also available as a rule
+/action/:
+
+#+begin_src elisp
+;; Bare form: allow on SAFE, ask on UNSAFE.
+(:tool "Bash" :conditions ((:command . "^make ")) :action judge)
+;; One action: sandbox on SAFE, ask on UNSAFE.
+(:tool "Bash" :conditions ((:command . "^make ")) :action (judge sandbox))
+;; Two actions: sandbox on SAFE, deny on UNSAFE.
+(:tool "Bash" :conditions ((:command . "^make ")) :action (judge sandbox deny))
+#+end_src
+
+=judge= is equivalent to =(judge allow ask)=; =(judge A)= to =(judge A
+ask)=. Both slots accept =allow=, =deny=, =ask= and =sandbox=. The
+judge inspects the call's full argument set. A malformed form warns
+and behaves as =ask=.
+
+Where the /condition/ form gates whether a rule matches (and falls
+through to later rules when it doesn't), the /action/ form owns the
+call once its conditions match — the judge's verdict picks the
+resolution and no later rule is consulted:
+
+| Judge outcome | Resolution |
+|---------------+------------|
+| SAFE          | the ON-SAFE action |
+| UNSAFE        | the ON-UNSAFE action (=deny= blocks with the rationale in the reason) |
+| failure (timeout, parse-fail, request-fail) | manual confirmation — never the ON-UNSAFE action |
+
+With =gptel-permit-judge-async= non-nil (the default), Emacs never
+blocks: the confirmation prompt appears immediately with a "⏳
+judging…" indicator, the request runs in the background, and the
+verdict is applied when it lands — a SAFE pack is accepted
+programmatically, UNSAFE applies its action, and the indicator
+vanishes. The wait is bounded by =gptel-permit-judge-timeout= (a
+watchdog resolves the call as a timeout and leaves the prompt). If
+you answer the prompt first, the stale verdict is discarded and
+logged.
+
+Two constraints keep async resolution conservative:
+
+- *Pack uniformity*: gptel accepts or rejects a prompt pack as a
+  whole, so a programmatic resolution happens only when /every/ call
+  in the pack is judge-gated and their resolutions agree. A mixed
+  pack (one judged call, one plain ask call) always waits for you.
+- *Audit sampling*: when analytics sampling selects a judge-gated
+  call, the judge still runs and its verdict is logged, but the
+  resolution is forced to the manual prompt — a sampled call is never
+  programmatically accepted or rejected. This measures the judge's
+  false-SAFE and false-UNSAFE rates alike.
+
+The prompt-while-judging flash is the accepted tradeoff of the async
+mode. Set =gptel-permit-judge-async= to nil to go back to the
+blocking behavior (the judge then freezes Emacs for up to
+=gptel-permit-judge-timeout= seconds per judged call, exactly like
+the condition form).
 
 * Local Analytics (opt-in)
 
@@ -547,9 +613,14 @@ still fold into the statistics:
   judge said no" from "the judge broke" (unparseable response, failed
   request, or timeout).
 - =confirm=: a manual prompt was shown.
-- =decision=: the user's resolution (allow / cancel / steer) together with
-  the milliseconds spent on the prompt. A cancel is recorded as an event,
-  not a terminal outcome (gptel permits resuming canceled calls).
+- =judge-verdict=: a judge action resolved the call — the verdict
+  (including failure classes), rationale, judged arguments and judge
+  latency in milliseconds, correlated with the call's id.
+- =decision=: the resolution (allow / cancel / steer for user
+  decisions, auto-allow / deny for programmatic judge resolutions)
+  together with the milliseconds spent on the prompt. A cancel is
+  recorded as an event, not a terminal outcome (gptel permits
+  resuming canceled calls).
 - =audit=: the call was an auto-allow that got audited by sampling (below).
 
 ** Enabling

@@ -133,8 +133,18 @@ Any element is nil when the tool call carries no such information."
                          (gptel-permit--truncate-arg v))))
 
 (defun gptel-permit-analytics--action-string (action)
-  "Return the rule ACTION as a string, or \"none\" when nil."
-  (if action (symbol-name action) "none"))
+  "Return the rule ACTION as a string, or \"none\" when nil.
+List-form actions serialize distinctly — (judge sandbox deny)
+becomes \"judge:sandbox/deny\" — so rule-match and verdict events
+stay well-formed for list actions."
+  (cond ((null action) "none")
+        ((consp action)
+         (concat (symbol-name (car action))
+                 (when (cdr action)
+                   (concat ":"
+                           (mapconcat (lambda (a) (format "%s" a))
+                                      (cdr action) "/")))))
+        (t (symbol-name action))))
 
 (defun gptel-permit-analytics--base-event (type tool id &optional extra)
   "Return the common event fields for TYPE, TOOL and tool-call ID.
@@ -182,7 +192,7 @@ the analytics module allocates no ids of its own."
     (gptel-permit-analytics--append-line
      (gptel-permit-analytics--base-event
       "rule-match" (plist-get tool-call :name) id
-      `((action . ,(symbol-name action)))))))
+      `((action . ,(gptel-permit-analytics--action-string action)))))))
 
 (defun gptel-permit-analytics--judge-fields ()
   "Return judge fields for the verdict event, or nil when absent.
@@ -278,12 +288,31 @@ decision, or nil when the decision could not be correlated."
     `((choice . ,choice)
       ,@(when wait-ms `((wait-ms . ,wait-ms)))))))
 
+(defun gptel-permit-analytics--emit-judge-verdict (tool-call id payload)
+  "Append a judge-verdict event for TOOL-CALL with tool-call ID.
+PAYLOAD is the plist the judge emits: :verdict (including the failure
+classes parse-fail, request-fail, timeout), :rationale, :arg (the
+judged argument string) and :latency-ms."
+  (when id
+    (gptel-permit-analytics--append-line
+     (gptel-permit-analytics--base-event
+      "judge-verdict" (plist-get tool-call :name) id
+      `(,@(when (plist-get payload :verdict)
+            `((judge-verdict . ,(symbol-name (plist-get payload :verdict)))))
+        (judge-rationale . ,(or (plist-get payload :rationale) ""))
+        ,@(when (plist-get payload :arg)
+            `((judge-arg . ,(gptel-permit--truncate-arg
+                             (plist-get payload :arg)))))
+        ,@(when (plist-get payload :latency-ms)
+            `((judge-latency-ms . ,(plist-get payload :latency-ms)))))))))
+
 (defun gptel-permit-analytics--observe (id tool-call type payload)
   "Adapter from `gptel-permit-events-functions' to the event emitters.
 Receives the uniform engine callback signature: the tool-call id,
-the enriched TOOL-CALL, the event TYPE (:tool-call, :rule-match, :verdict
-or :confirm) and the event PAYLOAD (nil, the matched action symbol,
-(ACTION . VERDICT) or nil respectively).  Inert unless analytics is
+the enriched TOOL-CALL, the event TYPE (:tool-call, :rule-match, :verdict,
+:confirm, or :judge-verdict emitted by the judge module) and the event
+PAYLOAD (nil, the matched action, (ACTION . VERDICT), nil, or the
+judge-verdict plist respectively).  Inert unless analytics is
 active.  Never signals: analytics failures are logged and never
 propagate into the permission hook (the core also isolates observers
 per function — belt and braces)."
@@ -295,7 +324,9 @@ per function — belt and braces)."
                         tool-call id payload))
           (:verdict    (gptel-permit-analytics--emit-verdict
                         tool-call id (car payload) (cdr payload)))
-          (:confirm    (gptel-permit-analytics--emit-confirm tool-call id)))
+          (:confirm    (gptel-permit-analytics--emit-confirm tool-call id))
+          (:judge-verdict (gptel-permit-analytics--emit-judge-verdict
+                           tool-call id payload)))
       (error (gptel-permit--log "Analytics: %s event failed: %S" type err)))))
 
 (defun gptel-permit-analytics--automation-allow-p (verdict)
@@ -326,8 +357,12 @@ closed, exactly as sampling errors did before this rode the veto hook."
 OV is the tool-call dispatch overlay, possibly nil.  Called as :before
 advice on gptel's `gptel--accept-tool-calls', `gptel--reject-tool-calls'
 and `gptel--steer-tool-calls'.  A cancel is recorded as an event, not a
-terminal outcome: gptel permits resuming canceled calls."
-  (when (gptel-permit-analytics--active-p)
+terminal outcome: gptel permits resuming canceled calls.  Calls made
+under a `gptel-permit--programmatic-call' binding are programmatic
+resolutions, not interactive approvals: the advice skips them (the
+programmatic resolver records its own decision events)."
+  (when (and (not gptel-permit--programmatic-call)
+             (gptel-permit-analytics--active-p))
     (condition-case err
         (let ((buffer (and (overlayp ov) (overlay-buffer ov)
                            (buffer-name (overlay-buffer ov)))))

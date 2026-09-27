@@ -87,7 +87,10 @@ A rule may contain the following keys:
   :action       One of allow, deny, ask, or any action symbol
                 registered in `gptel-permit-action-handlers'
                 (e.g. sandbox, provided by the optional sandbox
-                module).
+                module); or a list whose car is a registered action
+                symbol — the cdr is passed to the handler as a third
+                argument (e.g. (judge allow deny), provided by the
+                optional judge module).
 
 If both :tool and :tool-group are present, :tool takes
 precedence and a warning is emitted.  If neither :tool nor
@@ -134,7 +137,10 @@ Customize this variable or override it in your init file."
                       (choice (const :tag "Allow (auto-approve)" allow)
                               (const :tag "Deny (auto-block)" deny)
                               (const :tag "Ask (prompt user)" ask)
-                              (symbol :tag "Registered action"))))))
+                              (symbol :tag "Registered action")
+                              (cons :tag "Action form (list)"
+                                    (symbol :tag "Action")
+                                    (repeat sexp)))))))
   :group 'gptel-permit)
 
 (defvar-local gptel-permit-rules nil
@@ -418,11 +424,25 @@ Returns the rule's :action if matched, otherwise nil."
   "Alist mapping rule action symbols to handler functions.
 A handler is called with (ID TOOL-CALL) — the tool-call id minted by
 `gptel-permit--mint-tool-call-id' and the enriched tool call — and returns a
-verdict plist per `gptel-pre-tool-call-functions', or nil to defer.  The
-built-in actions (allow, deny, ask) are registered here like any other;
-optional modules register their entries at load time, e.g. the sandbox
-module adds \(sandbox . gptel-permit--sandbox-action).  A matched action
-with no registered handler fails closed: see `gptel-permit--apply-rules'.")
+verdict plist per `gptel-pre-tool-call-functions', or nil to defer.
+When the matched action is a cons cell (a list form), the engine
+dispatches on its car and calls the handler with the action's cdr as a
+third argument: (funcall handler ID TOOL-CALL (cdr action)); a handler
+that cannot take the third argument errors and the engine fails closed.
+The built-in actions (allow, deny, ask) are registered here like any
+other; optional modules register their entries at load time, e.g. the
+sandbox module adds \(sandbox . gptel-permit--sandbox-action).  A
+matched action with no registered handler fails closed: see
+`gptel-permit--apply-rules'.")
+
+(defvar gptel-permit--programmatic-call nil
+  "Non-nil while a rule action programmatically resolves prompted tool calls.
+Action implementations bind this around programmatic acceptance or
+rejection of tool calls (e.g. around a programmatic
+`gptel--accept-tool-calls').  Advice and hooks may use it to
+distinguish programmatic resolutions from interactive user approvals.
+The core never binds it; it only provides the default of nil.")
+
 
 (defvar gptel-permit--tool-call-serial 0
   "Serial component of tool-call ids minted in this Emacs session.")
@@ -526,13 +546,17 @@ the verdict to (:confirm t), preserving any :args rewrite."
            'gptel-permit-before-rule-match-functions id enriched)
           (let* ((action (gptel-permit--find-action id enriched))
                  (handler (and action
-                               (cdr (assq action gptel-permit-action-handlers))))
+                               (cdr (assq (if (consp action) (car action) action)
+                                          gptel-permit-action-handlers))))
                  (verdict
                   (cond ((null action) nil)
-                        (handler (funcall handler id enriched))
-                        (t (gptel-permit--log
-                            "No handler for action %S — failing closed" action)
-                           (list :confirm t)))))
+                        ((null handler)
+                         (gptel-permit--log
+                          "No handler for action %S — failing closed" action)
+                         (list :confirm t))
+                        ((consp action)
+                         (funcall handler id enriched (cdr action)))
+                        (t (funcall handler id enriched)))))
             (gptel-permit--log "Verdict: %s" (or action "none (fallback)"))
             (gptel-permit--emit-event id enriched :verdict (cons action verdict))
             (when (and action

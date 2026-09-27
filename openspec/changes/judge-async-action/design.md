@@ -166,6 +166,38 @@ core.
      actions (e.g. `(judge sandbox deny)` → `"judge:sandbox/deny"`) so
      rule-match/verdict events stay well-formed.
 
+10. **Ratified implementation decisions (D1–D4).**
+    - *D1 — cons-action dispatch convention:* in `gptel-permit--apply-rules`,
+      a cons action dispatches on its `car` and the handler is called with
+      the action's `cdr` as a third argument:
+      `(funcall handler id enriched (cdr action))`. Bare-symbol actions keep
+      the 2-arity call. A cons action whose handler cannot take three
+      arguments errors, and the engine's existing `condition-case` fails
+      closed (`(:confirm t)`). The registry docstring documents both
+      arities.
+    - *D2 — judged argument:* the judge action judges **all** of the call's
+      arguments (the whole normalized `:args` alist, formatted exactly as
+      the condition form formats its single value). No condition-key or
+      rule-context plumbing is introduced to pick a single argument.
+    - *D3 — resolution-time audit sampling:* before applying an async
+      resolution verdict, the callback runs
+      `run-hook-with-args-until-success` over `gptel-permit-veto-functions`
+      with the would-be verdict; a non-nil veto forces the manual
+      resolution (prompt stays). Sync mode needs no change: the engine's
+      existing veto call already sees the judge's resolution verdict.
+      No analytics symbol is referenced by the judge module.
+    - *D4 — programmatic resolution flag:* the core owns the dynamic
+      variable `gptel-permit--programmatic-call`; the async callback binds
+      it non-nil around programmatic `gptel--accept-tool-calls` /
+      `gptel-permit--reject-pending`. Its docstring is generic ("bound
+      non-nil while a rule action programmatically resolves tool calls;
+      advice and hooks may use this to distinguish programmatic resolutions
+      from interactive approvals") and names no add-on. Analytics' capture
+      advice checks the flag to suppress double-capture; the judge callback
+      pops analytics pending entries itself with the pre-rewrite args it
+      holds (featurep-guarded, like the existing `gptel-permit-analytics`
+      checks in the judge module).
+
 ## Implementation (mechanics deliberately kept out of the requirements)
 
 - Dispatch site: the judge module registers a `judge` action handler in
@@ -174,12 +206,16 @@ core.
   knowledge. The handler is called with (ID TOOL-CALL) — the tool-call
   id — which the async callback reuses so its `judge-verdict`
   events correlate with the call's chain. List forms (`(judge A)`,
-  `(judge A B)`) reach the handler through list-form dispatch (a cons action
-  looks up its car in the registry); the engine side of that dispatch is a
+  `(judge A B)`) reach the handler through cons dispatch per D1: the
+  handler's optional third argument receives the action's cdr, so the judge
+  handler reads its ON-SAFE/ON-UNSAFE from there (bare `judge` → no third
+  argument → defaults `(allow ask)`). The engine side of cons dispatch is a
   rule-engine delta owned by this change. Validation of the grammar happens
-  at rule-evaluation entry (malformed → warn + effective `ask`).
-- Mapping: `gptel-permit--judge-action-verdict (verdict on-safe on-unsafe)`
-  → resolution plist (shared by sync and async).
+  in the handler (malformed → warn + effective `ask`).
+- Mapping: `gptel-permit--judge-action-verdict (verdict on-safe on-unsafe
+  id tool-call)` → resolution plist (shared by sync and async); it
+  dispatches ON-SAFE/ON-UNSAFE through `gptel-permit-action-handlers` with
+  the same (ID TOOL-CALL) the judge handler received.
 - Stash: `gptel-permit--judge-pending` buffer-local alist keyed on
   `(tool name + args equal)`; entries carry on-safe/on-unsafe, the armed
   timer, and the issue timestamp.
@@ -195,6 +231,16 @@ core.
   `:result`, stash not already resolved; each no-op logs.
 
 ## Risks / Trade-offs
+
+- [gptel fires its callback several times per request] → Discovered during
+  implementation: a backend whose model leaks reasoning delivers a
+  `(reasoning . TEXT)` cons *before* the final string, `nil` is a terminal
+  failure and `t` an empty success body. Both request modes must therefore
+  treat only terminal deliveries as verdicts: intermediate conses are
+  ignored while the wait continues; `nil`/`t` record `request-fail`. This
+  was the root cause of a live failure where a thinking Ollama judge
+  recorded `request-fail` at the reasoning delivery and discarded the real
+  verdict 14s later.
 
 - [Prompt flash + user race: user accepts before the verdict → call runs
   unwrapped] → Documented behavior: a manual accept is an explicit human
