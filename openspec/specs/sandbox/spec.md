@@ -9,8 +9,10 @@ cannot be established.
 ## Requirements
 
 ### Requirement: Sandbox action
-The rule engine SHALL support `:action sandbox`. When a sandbox rule matches
-an execute-group tool call, the hook SHALL return
+The `sandbox` rule action SHALL be provided by the `gptel-permit-sandbox`
+module, which SHALL register its handler in `gptel-permit-action-handlers`
+at load time; the core rule engine SHALL contain no sandbox-specific code.
+When a sandbox rule matches an execute-group tool call, the hook SHALL return
 `(:confirm nil :args (:command WRAPPED))` where WRAPPED is the original
 command prefixed by the configured sandbox backend. Rules, the judge, and
 validation SHALL always see the original, unwrapped command.
@@ -99,3 +101,30 @@ mandatory denies, and `gptel-permit-sandbox-allowed-domains` to
 - WHEN the srt settings file is generated
 - THEN its JSON contains filesystem.allowWrite ["~/proj/"] and
   network.allowedDomains ["github.com"].
+
+### Requirement: Sandbox self-registration
+Loading `gptel-permit-sandbox` SHALL add its action handler to
+`gptel-permit-action-handlers` and SHALL add
+`gptel-permit-sandbox--post-tool` to `gptel-post-tool-call-functions`;
+both registrations SHALL be idempotent across reloads. Removal SHALL NOT be
+tied to `gptel-permit-mode`: with the mode off the post-tool tracker SHALL
+be inert (no wrapped commands exist to attribute). When the sandbox module
+is not loaded at all, a matching sandbox rule SHALL fail closed with
+`(:confirm t)` via the engine's unregistered-action handling.
+
+#### Scenario: Load registers both integration points
+- GIVEN the sandbox module has just been required
+- THEN `(assq 'sandbox gptel-permit-action-handlers)` SHALL be non-nil
+- AND `gptel-permit-sandbox--post-tool` SHALL be present on
+  `gptel-post-tool-call-functions`.
+
+#### Scenario: Reload stays single-registered
+- GIVEN the sandbox module is loaded twice
+- THEN the registry SHALL contain exactly one `sandbox` entry and the hook
+  exactly one `gptel-permit-sandbox--post-tool`.
+
+#### Scenario: Sandbox rule without the module
+- GIVEN `gptel-permit-sandbox` was never loaded
+- AND a matching rule with `:action sandbox`
+- WHEN the call is processed
+- THEN the hook SHALL return `(:confirm t)` and log the missing handler.
