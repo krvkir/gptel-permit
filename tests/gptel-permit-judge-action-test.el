@@ -194,11 +194,11 @@ later allow rule."
         (tc (list :name "Bash" :args '(:command "ls"))))
     (with-temp-buffer
       (gptel-permit-judge-test--with-async
-        (should (equal (gptel-permit--action-judge "id" tc)
-                       '(:confirm t)))
-        (should gptel-permit-judge-test--async-callback)
-        (should (assoc (cons "Bash" '(:command "ls"))
-                       gptel-permit--judge-pending #'equal))))))
+       (should (equal (gptel-permit--action-judge "id" tc)
+                      '(:confirm t)))
+       (should gptel-permit-judge-test--async-callback)
+       (should (assoc (cons "Bash" '(:command "ls"))
+                      gptel-permit--judge-pending #'equal))))))
 
 (ert-deftest gptel-permit-judge-async-safe-auto-accept ()
   "Async SAFE verdict auto-accepts a uniform pack."
@@ -211,15 +211,15 @@ later allow rule."
       (let ((ov (gptel-permit-judge-test--make-overlay
                  (list (gptel-permit-judge-test--tool-triple "Bash" '(:command "ls") (lambda (_)))))))
         (gptel-permit-judge-test--with-async
-          (cl-letf (((symbol-function 'gptel--accept-tool-calls)
-                     (lambda (tool-calls _ov)
-                       (setq accepted tool-calls))))
-            (gptel-permit--action-judge "id" tc)
-            (gptel-permit-judge-test--deliver-async "SAFE\nok")
-            (should accepted)
-            (should (= (length accepted) 1))
-            (should (equal (mapcar #'cadr accepted)
-                           (list '(:command "ls"))))))))))
+         (cl-letf (((symbol-function 'gptel--accept-tool-calls)
+                    (lambda (tool-calls _ov)
+                      (setq accepted tool-calls))))
+           (gptel-permit--action-judge "id" tc)
+           (gptel-permit-judge-test--deliver-async "SAFE\nok")
+           (should accepted)
+           (should (= (length accepted) 1))
+           (should (equal (mapcar #'cadr accepted)
+                          (list '(:command "ls"))))))))))
 
 (ert-deftest gptel-permit-judge-async-unsafe-ask-leaves-prompt ()
   "Async UNSAFE -> ask leaves the prompt in place."
@@ -232,12 +232,12 @@ later allow rule."
       (let ((ov (gptel-permit-judge-test--make-overlay
                  (list (gptel-permit-judge-test--tool-triple "Bash" '(:command "rm -rf /") (lambda (_)))))))
         (gptel-permit-judge-test--with-async
-          (cl-letf (((symbol-function 'gptel--accept-tool-calls)
-                     (lambda (_tc _ov) (setq accepted t))))
-            (gptel-permit--action-judge "id" tc '(allow ask))
-            (gptel-permit-judge-test--deliver-async "UNSAFE\ntouches /etc")
-            (should (overlay-buffer ov))
-            (should-not accepted)))))))
+         (cl-letf (((symbol-function 'gptel--accept-tool-calls)
+                    (lambda (_tc _ov) (setq accepted t))))
+           (gptel-permit--action-judge "id" tc '(allow ask))
+           (gptel-permit-judge-test--deliver-async "UNSAFE\ntouches /etc")
+           (should (overlay-buffer ov))
+           (should-not accepted)))))))
 
 (ert-deftest gptel-permit-judge-async-unsafe-deny-rejects ()
   "Async UNSAFE -> deny rejects the pack with rationale."
@@ -249,12 +249,12 @@ later allow rule."
     (with-temp-buffer
       (let ((ov (gptel-permit-judge-test--make-overlay
                  (list (gptel-permit-judge-test--tool-triple "Bash" '(:command "rm -rf /")
-                                               (lambda (r) (setq rejected r)))))))
+                                                             (lambda (r) (setq rejected r)))))))
         (gptel-permit-judge-test--with-async
-          (gptel-permit--action-judge "id" tc '(allow deny))
-          (gptel-permit-judge-test--deliver-async "UNSAFE\ntouches /etc")
-          (should (string-match-p "touches /etc" rejected))
-          (should-not (overlay-buffer ov)))))))
+         (gptel-permit--action-judge "id" tc '(allow deny))
+         (gptel-permit-judge-test--deliver-async "UNSAFE\ntouches /etc")
+         (should (string-match-p "touches /etc" rejected))
+         (should-not (overlay-buffer ov)))))))
 
 (ert-deftest gptel-permit-judge-async-timeout-leaves-prompt ()
   "Async timeout leaves the prompt and discards late responses."
@@ -267,14 +267,14 @@ later allow rule."
       (let ((ov (gptel-permit-judge-test--make-overlay
                  (list (gptel-permit-judge-test--tool-triple "Bash" '(:command "ls") (lambda (_)))))))
         (gptel-permit-judge-test--with-async
-          (cl-letf (((symbol-function 'gptel--accept-tool-calls)
-                     (lambda (_tc _ov) (setq accepted t))))
-            (gptel-permit--action-judge "id" tc)
-            (sleep-for 0.1)
-            (should (overlay-buffer ov))
-            (gptel-permit-judge-test--deliver-async "SAFE\nok")
-            (should (overlay-buffer ov))
-            (should-not accepted)))))))
+         (cl-letf (((symbol-function 'gptel--accept-tool-calls)
+                    (lambda (_tc _ov) (setq accepted t))))
+           (gptel-permit--action-judge "id" tc)
+           (sleep-for 0.1)
+           (should (overlay-buffer ov))
+           (gptel-permit-judge-test--deliver-async "SAFE\nok")
+           (should (overlay-buffer ov))
+           (should-not accepted)))))))
 
 (ert-deftest gptel-permit-judge-async-user-race-noop ()
   "A manual accept before the callback makes the callback a no-op."
@@ -287,10 +287,10 @@ later allow rule."
       (let ((ov (gptel-permit-judge-test--make-overlay
                  (list (gptel-permit-judge-test--tool-triple "Bash" '(:command "ls") (lambda (_)))))))
         (gptel-permit-judge-test--with-async
-          (gptel-permit--action-judge "id" tc)
-          (delete-overlay ov)
-          (gptel-permit-judge-test--deliver-async "SAFE\nok")
-          (should-not accepted))))))
+         (gptel-permit--action-judge "id" tc)
+         (delete-overlay ov)
+         (gptel-permit-judge-test--deliver-async "SAFE\nok")
+         (should-not accepted))))))
 
 (ert-deftest gptel-permit-judge-async-mixed-pack-no-auto ()
   "A mixed-resolution pack is never auto-resolved."
@@ -305,20 +305,20 @@ later allow rule."
       (let ((ov (gptel-permit-judge-test--make-overlay
                  (list (gptel-permit-judge-test--tool-triple "Bash" '(:command "ls") (lambda (_)))
                        (gptel-permit-judge-test--tool-triple "Bash" '(:command "rm -rf /")
-                                                              (lambda (r) (setq rejected r)))))))
+                                                             (lambda (r) (setq rejected r)))))))
         (gptel-permit-judge-test--with-async
-          (cl-letf (((symbol-function 'gptel--accept-tool-calls)
-                     (lambda (_tc _ov) (setq accepted t))))
-            (gptel-permit--action-judge "id1" tc1 '(allow deny))
-            (gptel-permit--action-judge "id2" tc2 '(allow deny))
-            (gptel-permit-judge-test--deliver-async "SAFE\nok")
-            (should (overlay-buffer ov))
-            (should-not accepted)
-            (should-not rejected)
-            (gptel-permit-judge-test--deliver-async "UNSAFE\ntouches /etc")
-            (should (overlay-buffer ov))
-            (should-not accepted)
-            (should-not rejected)))))))
+         (cl-letf (((symbol-function 'gptel--accept-tool-calls)
+                    (lambda (_tc _ov) (setq accepted t))))
+           (gptel-permit--action-judge "id1" tc1 '(allow deny))
+           (gptel-permit--action-judge "id2" tc2 '(allow deny))
+           (gptel-permit-judge-test--deliver-async "SAFE\nok")
+           (should (overlay-buffer ov))
+           (should-not accepted)
+           (should-not rejected)
+           (gptel-permit-judge-test--deliver-async "UNSAFE\ntouches /etc")
+           (should (overlay-buffer ov))
+           (should-not accepted)
+           (should-not rejected)))))))
 
 (ert-deftest gptel-permit-judge-async-indicator-lifecycle ()
   "Judging indicator appears while pending and is removed on resolution."
@@ -330,19 +330,19 @@ later allow rule."
       (let ((ov (gptel-permit-judge-test--make-overlay
                  (list (gptel-permit-judge-test--tool-triple "Bash" '(:command "ls") (lambda (_)))))))
         (gptel-permit-judge-test--with-async
-          (gptel-permit--action-judge "id" tc)
-          ;; The indicator is attached by a (run-at-time 0) timer, once the
-          ;; prompt overlay exists — let the timer fire.
-          (sleep-for 0.01)
-          (let ((ind (cl-find-if (lambda (o)
-                                   (overlay-get o 'gptel-permit-judge-indicator))
-                                 (overlays-in (point-min) (point-max)))))
-            (should ind))
-          (gptel-permit-judge-test--deliver-async "SAFE\nok")
-          (let ((ind (cl-find-if (lambda (o)
-                                   (overlay-get o 'gptel-permit-judge-indicator))
-                                 (overlays-in (point-min) (point-max)))))
-            (should-not ind)))))))
+         (gptel-permit--action-judge "id" tc)
+         ;; The indicator is attached by a (run-at-time 0) timer, once the
+         ;; prompt overlay exists — let the timer fire.
+         (sleep-for 0.01)
+         (let ((ind (cl-find-if (lambda (o)
+                                  (overlay-get o 'gptel-permit-judge-indicator))
+                                (overlays-in (point-min) (point-max)))))
+           (should ind))
+         (gptel-permit-judge-test--deliver-async "SAFE\nok")
+         (let ((ind (cl-find-if (lambda (o)
+                                  (overlay-get o 'gptel-permit-judge-indicator))
+                                (overlays-in (point-min) (point-max)))))
+           (should-not ind)))))))
 
 (ert-deftest gptel-permit-judge-action-inspects-all-args ()
   "The judge action prompt contains all args, not a single :checked-arg."
@@ -366,19 +366,19 @@ later allow rule."
       (let ((ov (gptel-permit-judge-test--make-overlay
                  (list (gptel-permit-judge-test--tool-triple "Bash" '(:command "ls") (lambda (_)))))))
         (gptel-permit-judge-test--with-async
-          (cl-letf (((symbol-function 'gptel--accept-tool-calls)
-                     (lambda (tool-calls _ov)
-                       (setq accepted tool-calls))))
-            (cl-letf (((symbol-function 'gptel-permit-sandbox--backend-available-p)
-                       (lambda () t))
-                      ((symbol-function 'gptel-permit-sandbox--resolve-binary)
-                       (lambda (_name) "/bin/true")))
-              (gptel-permit--action-judge "id" tc '(sandbox deny))
-              (gptel-permit-judge-test--deliver-async "SAFE\nok")
-              (should accepted)
-              (let ((args (cadr (car accepted))))
-                (should (plist-get args :command))
-                (should (string-match-p "bwrap" (plist-get args :command)))))))))))
+         (cl-letf (((symbol-function 'gptel--accept-tool-calls)
+                    (lambda (tool-calls _ov)
+                      (setq accepted tool-calls))))
+           (cl-letf (((symbol-function 'gptel-permit-sandbox--backend-available-p)
+                      (lambda () t))
+                     ((symbol-function 'gptel-permit-sandbox--resolve-binary)
+                      (lambda (_name) "/bin/true")))
+             (gptel-permit--action-judge "id" tc '(sandbox deny))
+             (gptel-permit-judge-test--deliver-async "SAFE\nok")
+             (should accepted)
+             (let ((args (cadr (car accepted))))
+               (should (plist-get args :command))
+               (should (string-match-p "bwrap" (plist-get args :command)))))))))))
 
 (ert-deftest gptel-permit-judge-async-unsafe-sandbox-wraps ()
   "Async (judge allow sandbox): UNSAFE verdicts select the confinement,
@@ -393,18 +393,18 @@ not a rejection — the pack is accepted with rewritten args."
                  (list (gptel-permit-judge-test--tool-triple
                         "Bash" '(:command "rm -rf /tmp/x") (lambda (_)))))))
         (gptel-permit-judge-test--with-async
-          (cl-letf (((symbol-function 'gptel--accept-tool-calls)
-                     (lambda (tool-calls _ov)
-                       (setq accepted tool-calls))))
-            (cl-letf (((symbol-function 'gptel-permit-sandbox--backend-available-p)
-                       (lambda () t))
-                      ((symbol-function 'gptel-permit-sandbox--resolve-binary)
-                       (lambda (_name) "/bin/true")))
-              (gptel-permit--action-judge "id" tc '(allow sandbox))
-              (gptel-permit-judge-test--deliver-async "UNSAFE\ntouches /etc")
-              (should accepted)
-              (let ((args (cadr (car accepted))))
-                (should (string-match-p "bwrap" (plist-get args :command)))))))))))
+         (cl-letf (((symbol-function 'gptel--accept-tool-calls)
+                    (lambda (tool-calls _ov)
+                      (setq accepted tool-calls))))
+           (cl-letf (((symbol-function 'gptel-permit-sandbox--backend-available-p)
+                      (lambda () t))
+                     ((symbol-function 'gptel-permit-sandbox--resolve-binary)
+                      (lambda (_name) "/bin/true")))
+             (gptel-permit--action-judge "id" tc '(allow sandbox))
+             (gptel-permit-judge-test--deliver-async "UNSAFE\ntouches /etc")
+             (should accepted)
+             (let ((args (cadr (car accepted))))
+               (should (string-match-p "bwrap" (plist-get args :command)))))))))))
 
 (ert-deftest gptel-permit-judge-async-reasoning-then-verdict-resolves ()
   "gptel may deliver a (reasoning . TEXT) cons before the final string;
@@ -419,20 +419,20 @@ the intermediate delivery is ignored and the string resolves the call."
                  (list (gptel-permit-judge-test--tool-triple
                         "Bash" '(:command "ls") (lambda (_)))))))
         (gptel-permit-judge-test--with-async
-          (cl-letf (((symbol-function 'gptel--accept-tool-calls)
-                     (lambda (_tc _ov) (setq accepted t))))
-            (gptel-permit--action-judge "id" tc)
-            (funcall gptel-permit-judge-test--async-callback
-                     '(reasoning . "looks harmless to me") nil)
-            ;; Intermediate delivery: nothing resolved, entry still in
-            ;; flight.
-            (should-not accepted)
-            (should-not (plist-get (cdr (assoc (cons "Bash" '(:command "ls"))
-                                               gptel-permit--judge-pending
-                                               (lambda (a b) (equal a b))))
-                                   :resolved))
-            (funcall gptel-permit-judge-test--async-callback "SAFE\nfine" nil)
-            (should accepted)))))))
+         (cl-letf (((symbol-function 'gptel--accept-tool-calls)
+                    (lambda (_tc _ov) (setq accepted t))))
+           (gptel-permit--action-judge "id" tc)
+           (funcall gptel-permit-judge-test--async-callback
+                    '(reasoning . "looks harmless to me") nil)
+           ;; Intermediate delivery: nothing resolved, entry still in
+           ;; flight.
+           (should-not accepted)
+           (should-not (plist-get (cdr (assoc (cons "Bash" '(:command "ls"))
+                                              gptel-permit--judge-pending
+                                              (lambda (a b) (equal a b))))
+                                  :resolved))
+           (funcall gptel-permit-judge-test--async-callback "SAFE\nfine" nil)
+           (should accepted)))))))
 
 (ert-deftest gptel-permit-judge-async-reasoning-then-failure-asks ()
   "A terminal failure delivery (nil) after an intermediate reasoning
@@ -447,19 +447,19 @@ cons resolves to the manual confirmation."
                  (list (gptel-permit-judge-test--tool-triple
                         "Bash" '(:command "ls") (lambda (_)))))))
         (gptel-permit-judge-test--with-async
-          (cl-letf (((symbol-function 'gptel--accept-tool-calls)
-                     (lambda (_tc _ov) (setq accepted t))))
-            (gptel-permit--action-judge "id" tc)
-            (funcall gptel-permit-judge-test--async-callback
-                     '(reasoning . "hmm") nil)
-            (funcall gptel-permit-judge-test--async-callback nil
-                     (list :status "HTTP/1.1 500 Server Error"))
-            (should (overlay-buffer ov))
-            (should-not accepted)
-            ;; A third delivery (whatever it is) is discarded as resolved.
-            (funcall gptel-permit-judge-test--async-callback "SAFE\nfine" nil)
-            (should (overlay-buffer ov))
-            (should-not accepted)))))))
+         (cl-letf (((symbol-function 'gptel--accept-tool-calls)
+                    (lambda (_tc _ov) (setq accepted t))))
+           (gptel-permit--action-judge "id" tc)
+           (funcall gptel-permit-judge-test--async-callback
+                    '(reasoning . "hmm") nil)
+           (funcall gptel-permit-judge-test--async-callback nil
+                    (list :status "HTTP/1.1 500 Server Error"))
+           (should (overlay-buffer ov))
+           (should-not accepted)
+           ;; A third delivery (whatever it is) is discarded as resolved.
+           (funcall gptel-permit-judge-test--async-callback "SAFE\nfine" nil)
+           (should (overlay-buffer ov))
+           (should-not accepted)))))))
 
 (ert-deftest gptel-permit-judge-async-indicator-removed-by-user-teardown ()
   "The judging indicator is removed when gptel runs the preview
@@ -473,18 +473,18 @@ teardown handles (the user's manual accept / steer / reject path)."
                  (list (gptel-permit-judge-test--tool-triple
                         "Bash" '(:command "ls") (lambda (_)))))))
         (gptel-permit-judge-test--with-async
-          (gptel-permit--action-judge "id" tc)
-          (sleep-for 0.01)
-          (should (cl-find-if (lambda (o)
-                                (overlay-get o 'gptel-permit-judge-indicator))
-                              (overlays-in (point-min) (point-max))))
-          ;; Mirror gptel's cleanup: run the preview teardown handles,
-          ;; exactly as gptel--accept-tool-calls does.
-          (dolist (handle (overlay-get ov 'previews))
-            (when (car handle) (apply handle)))
-          (should-not (cl-find-if (lambda (o)
-                                    (overlay-get o 'gptel-permit-judge-indicator))
-                                  (overlays-in (point-min) (point-max)))))))))
+         (gptel-permit--action-judge "id" tc)
+         (sleep-for 0.01)
+         (should (cl-find-if (lambda (o)
+                               (overlay-get o 'gptel-permit-judge-indicator))
+                             (overlays-in (point-min) (point-max))))
+         ;; Mirror gptel's cleanup: run the preview teardown handles,
+         ;; exactly as gptel--accept-tool-calls does.
+         (dolist (handle (overlay-get ov 'previews))
+           (when (car handle) (apply handle)))
+         (should-not (cl-find-if (lambda (o)
+                                   (overlay-get o 'gptel-permit-judge-indicator))
+                                 (overlays-in (point-min) (point-max)))))))))
 
 
 
@@ -500,18 +500,18 @@ teardown handles (the user's manual accept / steer / reject path)."
       (let ((ov (gptel-permit-judge-test--make-overlay
                  (list (gptel-permit-judge-test--tool-triple "Bash" '(:command "ls") (lambda (_)))))))
         (gptel-permit-judge-test--with-async
-          (cl-letf (((symbol-function 'gptel--accept-tool-calls)
-                     (lambda (_tc _ov) (setq accepted t)))
-                    (gptel-permit-veto-functions
-                     (list (lambda (_id _tc verdict)
-                             (setq veto-called t)
-                             (and (plist-member verdict :confirm)
-                                  (null (plist-get verdict :confirm)))))))
-            (gptel-permit--action-judge "id" tc)
-            (gptel-permit-judge-test--deliver-async "SAFE\nok")
-            (should veto-called)
-            (should (overlay-buffer ov))
-            (should-not accepted)))))))
+         (cl-letf (((symbol-function 'gptel--accept-tool-calls)
+                    (lambda (_tc _ov) (setq accepted t)))
+                   (gptel-permit-veto-functions
+                    (list (lambda (_id _tc verdict)
+                            (setq veto-called t)
+                            (and (plist-member verdict :confirm)
+                                 (null (plist-get verdict :confirm)))))))
+           (gptel-permit--action-judge "id" tc)
+           (gptel-permit-judge-test--deliver-async "SAFE\nok")
+           (should veto-called)
+           (should (overlay-buffer ov))
+           (should-not accepted)))))))
 
 (provide 'gptel-permit-judge-action-test)
 ;;; gptel-permit-judge-action-test.el ends here
@@ -523,25 +523,25 @@ happens, and the prompt survives."
         (gptel-permit-judge-async t)
         accepted)
     (gptel-permit-judge-test--with-async
-      (with-temp-buffer
-        (let* ((ov (gptel-permit-judge-test--make-overlay
-                    (list (gptel-permit-judge-test--tool-triple
-                           "Bash" '(:command "df") (lambda (_r) (setq accepted t)))
-                          (gptel-permit-judge-test--tool-triple
-                           "Glob" '(:path "/tmp") (lambda (_r) (setq accepted t))))))
-               (tc (list :name "Bash" :args '(:command "df"))))
-          (gptel-permit--action-judge "id" tc)
-          (gptel-permit-judge-test--deliver-async "SAFE\nok")
-          (let ((ind (cl-find-if (lambda (o)
-                                   (overlay-get o 'gptel-permit-judge-indicator))
-                                 (overlays-in (point-min) (point-max)))))
-            (should ind)
-            (should (string-match-p "Bash ✅" (overlay-get ind 'before-string)))
-            (should (string-match-p "manual confirm"
-                                    (overlay-get ind 'before-string))))
-          ;; The pack was not accepted: the sibling call needs a human.
-          (should (overlay-buffer ov))
-          (should-not accepted))))))
+     (with-temp-buffer
+       (let* ((ov (gptel-permit-judge-test--make-overlay
+                   (list (gptel-permit-judge-test--tool-triple
+                          "Bash" '(:command "df") (lambda (_r) (setq accepted t)))
+                         (gptel-permit-judge-test--tool-triple
+                          "Glob" '(:path "/tmp") (lambda (_r) (setq accepted t))))))
+              (tc (list :name "Bash" :args '(:command "df"))))
+         (gptel-permit--action-judge "id" tc)
+         (gptel-permit-judge-test--deliver-async "SAFE\nok")
+         (let ((ind (cl-find-if (lambda (o)
+                                  (overlay-get o 'gptel-permit-judge-indicator))
+                                (overlays-in (point-min) (point-max)))))
+           (should ind)
+           (should (string-match-p "Bash ✅" (overlay-get ind 'before-string)))
+           (should (string-match-p "manual confirm"
+                                   (overlay-get ind 'before-string))))
+         ;; The pack was not accepted: the sibling call needs a human.
+         (should (overlay-buffer ov))
+         (should-not accepted))))))
 
 (ert-deftest gptel-permit-judge-async-timeout-status-line ()
   "A watchdog timeout shows in the pack's status indicator, and the
@@ -549,21 +549,21 @@ prompt stays."
   (let ((gptel-permit-judge-backend "stub")
         (gptel-permit-judge-async t))
     (gptel-permit-judge-test--with-async
-      (with-temp-buffer
-        (let* ((ov (gptel-permit-judge-test--make-overlay
-                    (list (gptel-permit-judge-test--tool-triple
-                           "Bash" '(:command "df") (lambda (_r) nil))))
-               (tc (list :name "Bash" :args '(:command "df"))))
-          (gptel-permit--action-judge "id" tc)
-          (gptel-permit--judge-watchdog
-           (current-buffer) (cons "Bash" '(:command "df")))
-          (let ((ind (cl-find-if
-                      (lambda (o)
-                        (overlay-get o 'gptel-permit-judge-indicator))
-                      (overlays-in (point-min) (point-max)))))
-            (should ind)
-            (should (string-match-p "Bash ⚠"
-                                    (overlay-get ind 'before-string)))))))))
+     (with-temp-buffer
+       (let* ((ov (gptel-permit-judge-test--make-overlay
+                   (list (gptel-permit-judge-test--tool-triple
+                          "Bash" '(:command "df") (lambda (_r) nil)))))
+              (tc (list :name "Bash" :args '(:command "df"))))
+         (gptel-permit--action-judge "id" tc)
+         (gptel-permit--judge-watchdog
+          (current-buffer) (cons "Bash" '(:command "df")))
+         (let ((ind (cl-find-if
+                     (lambda (o)
+                       (overlay-get o 'gptel-permit-judge-indicator))
+                     (overlays-in (point-min) (point-max)))))
+           (should ind)
+           (should (string-match-p "Bash ⚠"
+                                   (overlay-get ind 'before-string)))))))))
 
 (provide 'gptel-permit-judge-action-test)
 ;;; gptel-permit-judge-action-test.el ends here

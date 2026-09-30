@@ -536,40 +536,41 @@ hook, so the core needs no judge knowledge."
 ;; -------------------------------------------------------------------
 
 (defmacro gptel-permit-judge-test--with-pack (entries &rest body)
-  "Set up a fake gptel tool overlay for ENTRIES and run BODY.
-ENTRIES is a list of (TOOL-NAME ARGS RESOLVED); each entry gets a
-stash record, an overlay triple, and shares one pack overlay with
-a live prompt overlay.  Binds OV (the pack overlay) and INDS
-(inspect afterwards: the list of indicator overlays) around BODY."
+  "Set up a fake gptel tool pack overlay for ENTRIES and run BODY.
+ENTRIES is a list of (TOOL-NAME ARGS RESOLVED); every entry gets a
+stash record and contributes a pending-call triple to one shared pack
+overlay.  That overlay also carries a live prompt overlay, which is
+the shape gptel builds: triples and prompt live on the same dispatch
+overlay (`gptel-permit--judge-find-pending-overlay' scans overlays for
+the triple).  Binds PACK-OV (the pack overlay) around BODY."
   (declare (indent 1))
   `(with-temp-buffer
      (insert "context text")
      (let* ((pack-ov (make-overlay 1 2 nil nil t))
             (prompt-ov (make-overlay 1 2 nil nil t))
-            (inds '())
             (entries ,entries))
        (overlay-put pack-ov 'prompt (list prompt-ov))
-       (setf (gptel-permit--judge-pending)
-             (mapcar (pcase-lambda (`(,name ,args ,resolved))
-                       (let* ((key (cons name args))
-                              (tool (gptel--make-tool-internal
+       (overlay-put pack-ov 'gptel-tool
+                    (mapcar (pcase-lambda (`(,name ,args ,_resolved))
+                              (list (gptel--make-tool-internal
                                      :name name :function #'ignore
-                                     :description "d" :args-type 'plist))
-                              (ov (make-overlay 1 2 nil nil t))
-                              (entry (list :on-safe '(:confirm nil)
-                                           :on-unsafe '(:confirm t)
-                                           :tool-call (list :name name :args args)
-                                           :issued-at (current-time)
-                                           :timeout-timer nil
-                                           :resolved resolved
-                                           :pack-ov pack-ov
-                                           :buffer (current-buffer))))
-                         (overlay-put ov 'gptel-tool
-                                      (list (list tool args "why")))
-                         (cons key entry)))
-             entries))
+                                     :description "d" :args-type 'plist)
+                                    args #'ignore))
+                            entries))
+       (setf gptel-permit--judge-pending
+             (mapcar (pcase-lambda (`(,name ,args ,resolved))
+                       (cons (cons name args)
+                             (list :on-safe '(:confirm nil)
+                                   :on-unsafe '(:confirm t)
+                                   :tool-call (list :name name :args args)
+                                   :issued-at (current-time)
+                                   :timeout-timer nil
+                                   :resolved resolved
+                                   :pack-ov pack-ov
+                                   :buffer (current-buffer))))
+                     entries))
        ,@body
-       (setf (gptel-permit--judge-pending) nil))))
+       (setf gptel-permit--judge-pending nil))))
 
 (ert-deftest gptel-permit-judge-test/status-line-mixed-pack ()
   "A verdict on one call shows in the pack's status line while its
@@ -603,7 +604,7 @@ the indicator instead of leaving a stale line."
   (gptel-permit-judge-test--with-pack '(("Bash" (:command "df") safe))
     (let ((ind (gptel-permit--judge-refresh-indicator pack-ov)))
       (should (overlayp ind))
-      (setf (gptel-permit--judge-pending) nil)
+      (setf gptel-permit--judge-pending nil)
       (should-not (gptel-permit--judge-refresh-indicator pack-ov))
       (should-not (overlay-buffer ind)))))
 
