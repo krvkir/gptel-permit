@@ -450,9 +450,57 @@ entries are plists:
   :actions     the (ON-SAFE . ON-UNSAFE) pair,
   :timer       the watchdog timer,
   :indicator   non-nil once the judging indicator was attached,
+  :overlay     the pack overlay this call was matched to, cached by
+               `gptel-permit--judge-find-pending-overlay' (nil until
+               gptel builds the prompt overlay),
   :issued-at   the issue time (float, for the judge-verdict latency),
   :resolved    nil (in flight), t (timed out), or the verdict symbol
-               once the judge answered.")
+               once the judge answered.
+Entries that can no longer influence a decision are dropped by
+`gptel-permit--judge-prune-pending', so the list stays proportional to
+the live packs rather than to the buffer's whole tool-call history.")
+
+
+(defun gptel-permit--judge-entry-by-key (key)
+  "Return this buffer's pending judge entry for KEY, or nil.
+KEY is a (TOOL-NAME . ARGS) cons; the most recently stashed entry with
+an `equal' key wins, matching the alist's push order."
+  (cdr (assoc key gptel-permit--judge-pending)))
+
+(defun gptel-permit--judge-entry-dead-p (entry)
+  "Return non-nil if ENTRY can no longer influence any decision.
+An entry whose pack overlay was identified (`:overlay') but has since
+been deleted is dead: the pack was accepted, denied or steered, so no
+status line can show the entry and no resolution can run through it.
+An entry not yet matched to an overlay is kept while its judge call is
+in flight — the prompt overlay is built only after the hook returns —
+and is dead once resolved, since no overlay shows it."
+  (let ((ov (plist-get entry :overlay)))
+    (cond ((and (overlayp ov) (overlay-buffer ov)) nil)
+          (ov t)
+          (t (and (plist-get entry :resolved) t)))))
+
+(defun gptel-permit--judge-prune-pending ()
+  "Drop pending entries that can no longer influence any decision.
+Keeps `gptel-permit--judge-pending' proportional to the live packs
+rather than to the buffer's whole history of tool calls, so lookups
+stay fast in a long session.  A dropped entry's watchdog timer is
+cancelled, so no timer fires for an entry that is gone.  Returns the
+number of entries dropped."
+  (let* ((split (cl-loop for cell in gptel-permit--judge-pending
+                         if (gptel-permit--judge-entry-dead-p (cdr cell))
+                         collect cell into dead
+                         else collect cell into live
+                         finally return (list live dead)))
+         (live (car split))
+         (dead (cadr split)))
+    (dolist (cell dead)
+      (when-let* ((timer (plist-get (cdr cell) :timer)))
+        (cancel-timer timer)))
+    (setq gptel-permit--judge-pending live)
+    (length dead)))
+
+
 
 (defun gptel-permit--judge-normalize-actions (form)
   "Normalize a judge action FORM to (ON-SAFE . ON-UNSAFE), or nil if malformed.
@@ -488,10 +536,12 @@ are real verdicts; any other symbol is a failed judgement."
 Each element is a (KEY . ENTRY) cons from this buffer's pending
 alist whose (TOOL-NAME . ARGS) key currently pends on OV's
 `gptel-tool' triples; entries whose overlay is gone — the user
-answered that pack — are skipped."
-  (cl-loop for (key . entry) in gptel-permit--judge-pending
-           when (eq (gptel-permit--judge-find-pending-overlay key) ov)
-           collect (cons key entry)))
+answered that pack — are skipped.  One overlay index serves every
+entry, so the cost does not grow with the pending list's length."
+  (let ((index (gptel-permit--judge-overlay-index)))
+    (cl-loop for (key . entry) in gptel-permit--judge-pending
+             when (eq (gethash key index) ov)
+             collect (cons key entry))))
 
 (defun gptel-permit--judge-status-line (entries)
   "Build the judging status string from a pack's pending ENTRIES.
@@ -607,36 +657,45 @@ preview teardown handles instead."
       (delete-overlay ind)))
   (overlay-put ov 'gptel-permit-judge-indicators nil))
 
+(defun gptel-permit--judge-attach-indicator (buffer key)
+  "Attach the judging indicator for KEY's pack in BUFFER, once it exists.
+Runs on a zero-delay timer after the stash: gptel builds the prompt
+overlay only after the pre-tool-call hook returns, so the lookup is
+deferred until the overlay exists.  Stale entries are pruned first;
+an already-resolved call or a missing pack attaches nothing."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (gptel-permit--judge-prune-pending)
+      (let* ((entry (gptel-permit--judge-entry-by-key key))
+             (ov (and entry
+                      (null (plist-get entry :resolved))
+                      (gptel-permit--judge-find-pending-overlay key))))
+        (when ov
+          (plist-put entry :indicator
+                     (gptel-permit--judge-refresh-indicator ov)))))))
+
+
+
 (defun gptel-permit--judge-stash (id tool-call actions)
   "Stash an in-flight async judge call in this buffer and return its entry.
 ID, TOOL-CALL and ACTIONS (the (ON-SAFE . ON-UNSAFE) pair) are stored
 under the call's (NAME . ARGS) identity; a watchdog armed at
 `gptel-permit-judge-timeout' resolves the call as a `timeout' failure,
 and the judging status indicator is attached once the event loop
-yields (the prompt overlay is created only after the hook returns)."
+yields (the prompt overlay is created only after the hook returns).
+Stale entries are pruned first, so the pending list tracks the live
+packs rather than the buffer's whole tool-call history."
   (let* ((key (cons (plist-get tool-call :name) (plist-get tool-call :args)))
          (entry (list :id id :tool-call tool-call :actions actions
-                      :timer nil :indicator nil :resolved nil
-                      :issued-at (float-time)))
+                      :timer nil :indicator nil :overlay nil
+                      :resolved nil :issued-at (float-time)))
          (buffer (current-buffer)))
+    (gptel-permit--judge-prune-pending)
     (plist-put entry :timer
                (run-at-time gptel-permit-judge-timeout nil
                             #'gptel-permit--judge-watchdog buffer key))
     (push (cons key entry) gptel-permit--judge-pending)
-    (run-at-time 0 nil
-                 (lambda (buf k)
-                   (when (buffer-live-p buf)
-                     (with-current-buffer buf
-                       (let ((e (cdr (assoc k gptel-permit--judge-pending
-                                            (lambda (a b) (equal a b))))))
-                         (when (and e
-                                    (null (plist-get e :resolved))
-                                    (gptel-permit--judge-find-pending-overlay k))
-                           (plist-put e :indicator
-                                      (gptel-permit--judge-refresh-indicator
-                                       (gptel-permit--judge-find-pending-overlay
-                                        k))))))))
-                 buffer key)
+    (run-at-time 0 nil #'gptel-permit--judge-attach-indicator buffer key)
     entry))
 
 (defun gptel-permit--judge-watchdog (buffer key)
@@ -648,8 +707,7 @@ logged; a late verdict hitting the entry is discarded as already
 resolved."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (let ((entry (cdr (assoc key gptel-permit--judge-pending
-                               (lambda (a b) (equal a b))))))
+      (let ((entry (gptel-permit--judge-entry-by-key key)))
         (when (and entry (null (plist-get entry :resolved)))
           (plist-put entry :resolved t)
           (setq gptel-permit--last-judge-verdict 'timeout
@@ -670,19 +728,39 @@ resolves programmatically (fail closed)."
           ((symbolp spec) (symbol-name spec))
           (t nil))))
 
+(defun gptel-permit--judge-overlay-index ()
+  "Return a hash table mapping pending-call keys to pack overlays.
+Built from one scan of this buffer's overlays; keys are
+\(TOOL-NAME . ARGS) conses (compared with `equal') and values are the
+first overlay carrying a matching `gptel-tool' triple.  One linear
+scan serves every lookup, which is what keeps a buffer with many tool
+calls fast."
+  (let ((index (make-hash-table :test #'equal)))
+    (dolist (ov (overlays-in (point-min) (point-max)))
+      (dolist (triple (overlay-get ov 'gptel-tool))
+        (when (consp triple)
+          (let ((name (gptel-permit--judge-triple-tool-name triple)))
+            (when name
+              (let ((key (cons name (cadr triple))))
+                (unless (gethash key index)
+                  (puthash key ov index))))))))
+    index))
+
 (defun gptel-permit--judge-find-pending-overlay (key)
   "Return the tool overlay in this buffer whose pack contains KEY.
 KEY is a (TOOL-NAME . ARGS) cons; a triple matches when its tool
-spec's name is the car and its args are `equal' to the cdr."
-  (cl-find-if
-   (lambda (ov)
-     (cl-some (lambda (triple)
-                (and (consp triple)
-                     (equal (gptel-permit--judge-triple-tool-name triple)
-                            (car key))
-                     (equal (cadr triple) (cdr key))))
-              (overlay-get ov 'gptel-tool)))
-   (overlays-in (point-min) (point-max))))
+spec's name is the car and its args are `equal' to the cdr.  The
+overlay found for KEY is cached on its pending entry (`:overlay') and
+reused while it is still live, so the repeated lookups a long session
+makes cost no buffer scan; a deleted overlay falls back to one scan of
+`gptel-permit--judge-overlay-index'."
+  (let* ((entry (gptel-permit--judge-entry-by-key key))
+         (cached (and entry (plist-get entry :overlay))))
+    (if (and (overlayp cached) (overlay-buffer cached))
+        cached
+      (let ((ov (gethash key (gptel-permit--judge-overlay-index))))
+        (when entry (plist-put entry :overlay ov))
+        ov))))
 
 (defun gptel-permit--judge-emit-verdict-event (id tool-call verdict latency-ms)
   "Emit the judge-verdict event for ID and TOOL-CALL through the core.
@@ -723,8 +801,7 @@ acted first)."
   (when (and (buffer-live-p buffer)
              (gptel-permit--judge-final-response-p response))
     (with-current-buffer buffer
-      (let ((entry (cdr (assoc key gptel-permit--judge-pending
-                               (lambda (a b) (equal a b))))))
+      (let ((entry (gptel-permit--judge-entry-by-key key)))
         (cond
          ((or (null entry) (plist-get entry :resolved))
           (gptel-permit--log "Judge: discarded late verdict for %S" key))
@@ -789,8 +866,7 @@ mixed packs never resolve programmatically."
                    (let* ((name (gptel-permit--judge-triple-tool-name triple))
                           (key (and name (cons name (cadr triple))))
                           (entry (and key
-                                      (cdr (assoc key gptel-permit--judge-pending
-                                                  (lambda (a b) (equal a b)))))))
+                                      (gptel-permit--judge-entry-by-key key))))
                      (when (and entry
                                 (plist-get entry :resolved)
                                 (not (eq (plist-get entry :resolved) t)))
@@ -862,8 +938,7 @@ and the user is told why no auto-action happened."
                 (unresolved (cl-count-if (pcase-lambda (`(,_ . ,e))
                                            (null (plist-get e :resolved)))
                                          entries))
-                (just (cdr (assoc key gptel-permit--judge-pending
-                                  (lambda (a b) (equal a b))))))
+                (just (gptel-permit--judge-entry-by-key key)))
            (gptel-permit--log
             "Judge: no programmatic resolution — %d unresolved of %d judge-gated"
             unresolved (length entries))

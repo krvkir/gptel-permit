@@ -609,6 +609,107 @@ the indicator instead of leaving a stale line."
       (should-not (overlay-buffer ind)))))
 
 
+;; -------------------------------------------------------------------
+;; Pending-list pruning and overlay caching
+;; -------------------------------------------------------------------
+
+(ert-deftest gptel-permit-judge-test/prune-drops-dead-entries ()
+  "An entry whose cached pack overlay was deleted is pruned, so is a
+resolved entry no overlay can show, and an in-flight entry whose pack
+overlay vanished; a live pack and a not-yet-attached call stay."
+  (with-temp-buffer
+    (insert "context")
+    (let ((live (make-overlay 1 2 nil nil t))
+          (dead (make-overlay 1 2 nil nil t))
+          (timer (run-at-time 60 nil #'ignore)))
+      (setf gptel-permit--judge-pending
+            (list (cons (cons "Live" '(:x 1)) (list :overlay live))
+                  (cons (cons "Dead" '(:x 2)) (list :overlay dead))
+                  (cons (cons "Resolved" '(:x 3))
+                        (list :overlay nil :resolved 'safe))
+                  (cons (cons "Flight" '(:x 4)) (list :overlay nil))
+                  (cons (cons "Timed-out" '(:x 5))
+                        (list :overlay dead :timer timer))))
+      (delete-overlay dead)
+      (should (= 3 (gptel-permit--judge-prune-pending)))
+      (should (equal (mapcar #'car gptel-permit--judge-pending)
+                     (list (cons "Live" '(:x 1))
+                           (cons "Flight" '(:x 4)))))
+      ;; A dropped entry's watchdog timer is cancelled with it.
+      (should-not (memq timer timer-list)))))
+
+(ert-deftest gptel-permit-judge-test/prune-keeps-live-and-all-flight ()
+  "Pruning is a no-op when nothing is dead: the pending list is left
+exactly as it was."
+  (with-temp-buffer
+    (insert "context")
+    (let ((live (make-overlay 1 2 nil nil t)))
+      (setf gptel-permit--judge-pending
+            (list (cons (cons "Live" '(:x 1)) (list :overlay live))
+                  (cons (cons "Flight" '(:x 2)) (list :overlay nil))))
+      (should (= 0 (gptel-permit--judge-prune-pending)))
+      (should (= 2 (length gptel-permit--judge-pending))))))
+
+(ert-deftest gptel-permit-judge-test/find-pending-overlay-caches-on-entry ()
+  "The overlay matched for a key is cached on its pending entry, so
+later lookups need no buffer scan."
+  (gptel-permit-judge-test--with-pack '(("Bash" (:command "df") nil))
+    (let ((key (cons "Bash" '(:command "df"))))
+      (should (eq (gptel-permit--judge-find-pending-overlay key) pack-ov))
+      (should (eq (plist-get (cdr (assoc key gptel-permit--judge-pending))
+                             :overlay)
+                  pack-ov)))))
+
+(ert-deftest gptel-permit-judge-test/find-pending-overlay-forgets-dead-cache ()
+  "A cached overlay that has since been deleted is not returned again,
+so a resolved pack cannot swallow a later call's lookup."
+  (gptel-permit-judge-test--with-pack '(("Bash" (:command "df") nil))
+    (let ((key (cons "Bash" '(:command "df"))))
+      (should (eq (gptel-permit--judge-find-pending-overlay key) pack-ov))
+      (delete-overlay pack-ov)
+      (should-not (gptel-permit--judge-find-pending-overlay key)))))
+
+(ert-deftest gptel-permit-judge-test/overlay-entries-ignores-unmatched-key ()
+  "An entry whose key is on no pack triple is not listed for the pack,
+while the pack's own entries are."
+  (gptel-permit-judge-test--with-pack '(("Bash" (:command "df") nil))
+    (push (cons (cons "Glob" '(:path "/tmp")) (list :overlay nil))
+          gptel-permit--judge-pending)
+    (let ((entries (gptel-permit--judge-overlay-entries pack-ov)))
+      (should (= 1 (length entries)))
+      (should (equal (caar entries) (cons "Bash" '(:command "df")))))))
+
+(ert-deftest gptel-permit-judge-test/stash-prunes-stale-entries ()
+  "A new stash drops entries whose pack overlay is gone, so the
+pending list tracks the live packs rather than the call history."
+  (let ((gptel-permit-judge-backend "stub")
+        (gptel-permit-judge-async t)
+        (gptel-permit-judge-timeout 60))
+    (with-temp-buffer
+      (insert "context")
+      (let ((stale (make-overlay 1 2 nil nil t)))
+        (setf gptel-permit--judge-pending
+              (list (cons (cons "Old" '(:command "old"))
+                          (list :overlay stale))))
+        (delete-overlay stale)
+        ;; Stub the request so the stash runs without touching gptel.
+        (cl-letf (((symbol-function 'gptel-request)
+                   (lambda (_prompt &rest _keys) nil))
+                  ((symbol-function 'gptel-get-backend)
+                   (lambda (_name) 'fake-judge-backend)))
+          (gptel-permit--action-judge
+           "id" (list :name "Bash" :args '(:command "ls")))))
+      (should (= 1 (length gptel-permit--judge-pending)))
+      (should (assoc (cons "Bash" '(:command "ls"))
+                     gptel-permit--judge-pending #'equal))
+      (dolist (cell gptel-permit--judge-pending)
+        (when-let* ((tm (plist-get (cdr cell) :timer)))
+          (cancel-timer tm))))))
+
+
+
+
+
 
 (provide 'gptel-permit-judge-test)
 ;;; gptel-permit-judge-test.el ends here
