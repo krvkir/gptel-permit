@@ -1,7 +1,14 @@
 # analytics Specification
 
 ## Purpose
-TBD - created by archiving change analytics. Update Purpose after archive.
+Record every permission decision to an append-only local JSONL log and
+derive statistics from it: how often rules auto-approve versus how often a
+human is asked, how long users take to confirm, and the false-allow rate
+measured by audit sampling of automation-allow verdicts. Capture is inert
+until `gptel-permit-register-analytics-hooks` runs, and it flows entirely
+through the core engine hooks and advice on gptel's interactive tool-call
+commands — the rule engine never calls into analytics by name.
+
 ## Requirements
 ### Requirement: Explicit opt-in registration
 Analytics SHALL be inert until the user calls
