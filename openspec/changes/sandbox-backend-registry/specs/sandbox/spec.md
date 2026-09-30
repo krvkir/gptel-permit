@@ -39,7 +39,10 @@ resolved with the shared project-root-relative rules of
 (`~/.bashrc`, `~/.bash_profile`, `~/.profile`, `~/.zshrc`). The sandbox SHALL
 NOT add its own hardcoded entries: `gptel-permit-protected-dirs` is the
 single source of truth. Nonexistent paths SHALL be skipped (bwrap
-limitation, documented in README).
+limitation, documented in README), and a path whose final component is a
+symbolic link SHALL be bound at its target — bubblewrap refuses to mount
+onto a symlink destination and would otherwise abort the whole
+invocation.
 
 #### Scenario: .git protected by default via protected-dirs
 - GIVEN default `gptel-permit-protected-dirs` ("~/.ssh/" "~/.gnupg/" "./.git")
@@ -121,7 +124,12 @@ further confirmation, so a broken wrapper effectively disables sandboxing.
 The shipped bwrap and srt backends SHALL be provided as separate library
 files — `gptel-permit-sandbox-bwrap.el` and `gptel-permit-sandbox-srt.el` —
 each defining its backend class, its two generic methods, and contributing
-its registry entry. The sandbox core SHALL load both modules and SHALL NOT
+its registry entry at load. The sandbox core SHALL NOT require the two
+modules at load time: a core constant SHALL map shipped backend symbols to
+their feature names, and resolution/dispatch SHALL lazily require a
+backend's module the first time that backend is needed (explicitly
+selected, or table-selected under `auto`). Users MAY also require the
+module files directly; `require` is idempotent. The sandbox core SHALL NOT
 contain backend-specific wrapper construction itself.
 
 #### Scenario: Core contains no backend argv construction
@@ -130,31 +138,48 @@ contain backend-specific wrapper construction itself.
   `gptel-permit-sandbox.el`
 - THEN none is found — all wrapper strings come from the backend classes.
 
+#### Scenario: Backends not loaded until needed
+- GIVEN gptel-permit and the sandbox core are loaded and no sandboxed call
+  has been made
+- WHEN `(featurep 'gptel-permit-sandbox-bwrap)` is checked
+- THEN it is nil; the module loads on the first sandbox dispatch that needs
+  it.
+
 ### Requirement: auto resolution
 When `gptel-permit-sandbox-backend` is `auto`, the sandbox SHALL resolve the
-backend once per session: on GNU/Linux resolve to `bwrap`; on other platforms
-resolve to the first registered backend (registry order) whose available-p
-method returns non-nil; resolve to nil when none is available. Resolution
-SHALL consider user-registered backends, so a third-party backend becomes
-reachable via `auto` without code changes. The resolved value SHALL be
-re-resolved when the registry changes, and availability SHALL be re-verified
-at wrap time per call. The resolved value SHALL be reported in the log.
+backend with a static platform table: on `gnu/linux` resolve to `bwrap`; on
+`darwin` or `windows-nt` resolve to `srt`; on any other platform resolve to
+nil. There SHALL be no cross-fallback between backends and no registry-order
+scan: if the table-selected backend declares itself unavailable (e.g. its
+binary is not on exec-path), `auto` SHALL resolve to nil. Resolution SHALL
+be recomputed on every call (no memoization), so a binary installed later
+on the same session is picked up, and availability SHALL also be re-verified
+at wrap time per call. The resolved symbol — or its unavailability — SHALL
+be reported in the log. Users who need a different mapping SHALL set
+`gptel-permit-sandbox-backend` explicitly.
 
 #### Scenario: Linux resolves to bwrap
 - GIVEN `system-type` is `gnu/linux` and bwrap is on exec-path
-- WHEN the backend is resolved for the first time
+- WHEN a sandbox rule is evaluated
 - THEN `auto` resolves to `bwrap`.
 
-#### Scenario: Non-Linux picks first available registered backend
-- GIVEN `system-type` is `darwin`, `srt` is not installed, and a
-  user-registered backend `mac-sandbox` whose available-p method returns t
-- WHEN the backend is resolved
-- THEN `auto` resolves to `mac-sandbox`.
+#### Scenario: macOS resolves to srt
+- GIVEN `system-type` is `darwin` and srt is installed
+- WHEN `gptel-permit-sandbox-backend` is `auto`
+- THEN the srt backend's wrap method builds the invocation.
 
-#### Scenario: Nothing available resolves to nil
-- GIVEN `system-type` is `windows-nt` and no registered backend is available
-- WHEN the backend is resolved
-- THEN `auto` resolves to nil and every sandbox action fails closed.
+#### Scenario: Missing platform default resolves to nil — no cross-fallback
+- GIVEN `system-type` is `gnu/linux`, bwrap is not on exec-path, and srt
+  is installed
+- WHEN a sandbox rule is evaluated with `auto`
+- THEN the hook returns `(:confirm t)` — `auto` does not fall through to
+  srt.
+
+#### Scenario: Binary installed later is picked up without a restart
+- GIVEN `auto` resolved to nil for a sandboxed call (binary missing)
+- WHEN the binary is installed and a sandbox rule is evaluated again
+- THEN the resolver picks the platform backend again and the call is
+  wrapped.
 
 ### Requirement: bwrap backend wrapper
 The bwrap backend's wrap method SHALL construct:

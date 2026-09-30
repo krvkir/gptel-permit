@@ -71,6 +71,11 @@ never sampled.  Only active while analytics is registered and enabled."
 (defvar gptel-permit--last-judge-rationale)
 (defvar gptel-permit--last-judge-verdict)
 
+;; The sandbox's sandboxed-acceptance binding (alist of rewritten args
+;; → original args), defined in `gptel-permit-sandbox' and read on the
+;; accept-time pop path above.  Declaration only, for the compiler.
+(defvar gptel-permit-sandbox--rewritten-args)
+
 (defconst gptel-permit-analytics--pending-limit 64
   "Maximum pending confirmations kept per (buffer tool args) key.")
 
@@ -241,14 +246,36 @@ and VERDICT is the verdict plist computed from it."
 (defun gptel-permit-analytics--pop-pending (buffer tool args)
   "Pop the oldest pending confirmation for (BUFFER TOOL ARGS).
 When no exact entry exists, fall back to matching TOOL and ARGS in any
-buffer.  Returns (ID . CONFIRM-TIME) or nil."
+buffer.  A third fallback consults the sandbox's
+`gptel-permit-sandbox--rewritten-args' binding: a sandboxed acceptance
+arrives with rewritten args, and the (NEW-ARGS . OLD-ARGS) pair
+resolves the entry pended under the ORIGINAL args.  Returns
+(ID . CONFIRM-TIME) or nil."
   (let* ((key (list buffer tool args))
          (entry (or (assoc key gptel-permit-analytics--pending #'equal)
                     (cl-find-if
                      (lambda (e)
                        (and (equal (cadr (car e)) tool)
                             (equal (caddr (car e)) args)))
-                     gptel-permit-analytics--pending))))
+                     gptel-permit-analytics--pending)
+                    ;; A sandboxed acceptance arrives with rewritten
+                    ;; args; the sandbox binds (NEW . OLD) pairs, so
+                    ;; the entry may be pended under the ORIGINAL args.
+                    (let ((original
+                           (cdr-safe
+                            (assoc args
+                                   gptel-permit-sandbox--rewritten-args
+                                   #'equal))))
+                      (and original
+                           (let* ((orig-key (list buffer tool original)))
+                             (or (assoc orig-key
+                                        gptel-permit-analytics--pending
+                                        #'equal)
+                                 (cl-find-if
+                                  (lambda (e)
+                                    (and (equal (cadr (car e)) tool)
+                                         (equal (caddr (car e)) original)))
+                                  gptel-permit-analytics--pending))))))))
     (when entry
       (let ((head (cadr entry)))
         (setcdr entry (cddr entry))

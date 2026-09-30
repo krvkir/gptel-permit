@@ -33,8 +33,11 @@ Another day you bring in a tool which, for example, greps git logs in a folder. 
   ;; Enable global minor mode so that rules would work in every buffer.
   :config (gptel-permit-mode 1)
   :custom
-  ;; Add your vaults or other folders with sensitive data.
-  (gptel-permit-protected-dirs '("~/.ssh/" "~/.gnupg/")) 
+  ;; Add your vaults or other folders with sensitive data.  Entries
+  ;; starting with "./" are project-root relative; the default is
+  ;; ("~/.ssh/" "~/.gnupg/" "./.git"), and setting this option replaces
+  ;; it — so keep "./.git" if you want the git protection.
+  (gptel-permit-protected-dirs '("~/.ssh/" "~/.gnupg/" "./.git")) 
   ;; This option must be set to 'auto, otherwise gptel will discard the rule engine's decisions.
   (gptel-confirm-tool-calls 'auto))
 #+end_src
@@ -225,7 +228,7 @@ The rule is instantly added to your active session (=gptel-permit-rules=) and ap
 
 - =gptel-permit-global-rules=: Persisted global rules.
 - =gptel-permit-tool-groups=: Map tool names to tool-groups and argument-groups.
-- =gptel-permit-protected-dirs=: Directories matching the ~:inside-protected-dirs~ predicate (default: ~("~/.ssh/" "~/.gnupg/")~).
+- =gptel-permit-protected-dirs=: Directories matching the ~:inside-protected-dirs~ predicate and read-only bound by the sandbox (default: ~("~/.ssh/" "~/.gnupg/" "./.git")~). An entry starting with =./= is resolved against the project root, so =./.git= protects the current project's git metadata (hooks and config).
 - =gptel-permit-log-enabled=: Set to ~t~ to print verbose matching diagnostics to the =*gptel-permit-log*= buffer.
 
 * Sandboxing Bash Commands
@@ -252,7 +255,31 @@ approval.
 guarantee. Read the "Known Limitations" below before running an agent
 unattended.
 
-** Built-in bubblewrap backend (default)
+** Backend selection
+
+=gptel-permit-sandbox-backend= chooses the backend that builds the wrapper:
+
+- ~auto~ (the default) :: a static platform table — =gnu/linux= → ~bwrap~,
+  =darwin= and =windows-nt= → ~srt~, any other platform → nothing. The table
+  is consulted on /every/ call (no memoization), so a binary installed
+  mid-session is picked up without a restart. There is no cross-fallback:
+  when the table-picked backend is unavailable the call fails closed to
+  manual confirmation instead of quietly trying another backend. Set the
+  option explicitly if you disagree with the table.
+- ~bwrap~, ~srt~ :: the shipped backends, on any platform.
+- any other symbol :: your own backend, registered in
+  =gptel-permit-sandbox-backends= (see [[*Writing a backend][Writing a backend]]).
+
+The shipped backends live in their own files
+(=gptel-permit-sandbox-bwrap.el=, =gptel-permit-sandbox-srt.el=); the
+sandbox core loads one lazily the first time it is needed, so requiring
+them yourself is optional.
+
+*Migration note:* the backend symbol ~builtin~ was renamed ~bwrap~. If you
+set ~gptel-permit-sandbox-backend~ to ~'builtin~, change it to ~'bwrap~.
+The sandbox action used by rules is still spelled ~sandbox~.
+
+** Bubblewrap backend (=bwrap=)
 
 Requires only =bubblewrap= (=bwrap=) on Linux. The wrapper is:
 
@@ -272,20 +299,29 @@ bwrap --die-with-parent --new-session --clearenv --setenv V v ...
   =gptel-permit-sandbox-env-keep= (default: PATH, HOME, LANG, LC_ALL, TERM,
   TMPDIR).
 - Network is off by default; set =gptel-permit-sandbox-network= to ~t~ to
-  leave it on (binary on/off — there is no domain allowlist in the builtin
-  backend; that needs the srt backend or a proxy).
-- Mandatory protections regardless of rules: =<project>/.git= (hooks and
-  config), =~/.ssh=, =~/.gnupg=, existing shell rc files
-  (=~/.bashrc=, =~/.bash_profile=, =~/.profile=, =~/.zshrc=) and every entry of
-  =gptel-permit-protected-dirs= are read-only bound when they exist.
+  leave it on (binary on/off — the bwrap backend has no domain allowlist;
+  that needs srt or a proxy).
+- Read-only binds come from =gptel-permit-protected-dirs= plus existing
+  shell rc files (=~/.bashrc=, =~/.bash_profile=, =~/.profile=, =~/.zshrc=).
+  The option's default is ~("~/.ssh/" "~/.gnupg/" "./.git")~, where the
+  =./= prefix means "relative to the project root"; the sandbox adds no
+  hardcoded paths of its own, so re-add =./.git= if you customize the
+  option.
 - =gptel-permit-sandbox-extra-args= is an escape hatch for extra bwrap
   flags.
-- Fail closed: if the sandbox binary is not on =exec-path=, the action
-  returns ~(:confirm t)~ (manual confirmation) instead of silently running
-  anything.
-- A boundary-failure retry counter (per gptel buffer) forces manual
-  confirmation after =gptel-permit-sandbox-retry-limit= (default 3)
-  consecutive sandboxed-command failures.
+- Fail closed: if the backend's binary is not on =exec-path= (or the
+  platform does not match), the action returns ~(:confirm t)~ (manual
+  confirmation) instead of silently running anything.
+- A tool without a registered sandbox adapter (see
+  [[*Tool adapters][Tool adapters]]) fails closed the same way, with a message
+  naming the tool — no guessing which argument to wrap.
+- Retry latch (per gptel buffer): after
+  =gptel-permit-sandbox-retry-limit= (default 3) consecutive sandboxed-command
+  boundary failures, every sandbox verdict becomes a manual confirmation —
+  and stays that way until a sandboxed command succeeds or you run
+  =M-x gptel-permit-sandbox-reset=. The latch is deliberately sticky: you
+  triage the cause once and clear it explicitly, instead of the streak
+  silently resetting itself.
 
 ** Setup
 
@@ -345,6 +381,85 @@ next rule (normally ask):
  :action sandbox)
 #+end_src
 
+** Sandbox-and-accept: =C-c C-s=
+
+=C-c C-s= accepts the pending calls /with sandboxed arguments/ — the same
+rewrite the ~sandbox~ action applies — without waiting for a rule to match.
+Use it when a call already reached the prompt (an ~ask~ rule, a mixed pack
+that a judge refused to resolve, a judge timeout) and you want it to run
+inside the boundary anyway.
+
+Acceptance is all-or-nothing: if any pending call has no adapter, or no
+backend is available, /nothing/ is accepted and the message names the
+offending tool. Plain =C-c C-c= still accepts unwrapped, and rejecting the
+prompt is unchanged.
+
+** Writing a backend
+
+A backend is an EIEIO class derived from =gptel-permit-sandbox-backend-base=
+implementing two generic functions, plus one registry entry:
+
+#+begin_src elisp
+(require 'gptel-permit-sandbox)
+
+(defclass my-nsjail-backend (gptel-permit-sandbox-backend-base) ())
+
+(cl-defmethod gptel-permit-sandbox-available-p ((_ my-nsjail-backend))
+  "Non-nil when this backend can run here."
+  (executable-find "nsjail"))
+
+(cl-defmethod gptel-permit-sandbox-wrap
+  ((_ my-nsjail-backend) command root)
+  "Return the sandboxed invocation string for COMMAND (project ROOT)."
+  (and command
+       (format "nsjail --chroot / --cwd %s -- /bin/sh -c %s"
+               (shell-quote-argument (or root default-directory))
+               (shell-quote-argument command))))
+
+(add-to-list 'gptel-permit-sandbox-backends
+             '(nsjail . my-nsjail-backend))
+;; then: (setq gptel-permit-sandbox-backend 'nsjail)
+#+end_src
+
+- The generic functions are the contract: =C-h f
+  gptel-permit-sandbox-wrap= lists every implementation, and the shipped
+  =gptel-permit-sandbox-bwrap.el= / =gptel-permit-sandbox-srt.el= are
+  copy-paste templates for a whole backend (class, two methods, registry
+  entry, and their options).
+- *Security-relevant:* whatever =gptel-permit-sandbox-wrap= returns runs
+  without further confirmation. A wrap method that forgets a part of the
+  boundary, or splices the command in unquoted, is a missing (or bypassable)
+  sandbox. Return ~nil~ when the invocation cannot be built — the action
+  then fails closed to manual confirmation.
+- The base class ends in =-base= because EIEIO binds a class's name as a
+  variable holding the class symbol: a class named exactly
+  =gptel-permit-sandbox-backend= would clobber that option and silently
+  disable ~auto~.
+- Your backend joins ~auto~ only by you setting the option explicitly; the
+  platform table never picks third-party backends.
+
+** Tool adapters
+
+Backends build wrapper strings; /adapters/ decide which argument of which
+tool gets wrapped. =gptel-permit-sandbox-adapters= maps a tool name to a
+function called as ~(ARGS TOOL-CALL ROOT)~ returning a rewritten argument
+plist (or ~nil~, which fails closed):
+
+#+begin_src elisp
+(setf (alist-get "Eval" gptel-permit-sandbox-adapters)
+      (list :wrap-args
+            (lambda (args _tool-call root)
+              (when-let* ((expr (plist-get args :expression)))
+                (plist-put (copy-sequence args) :expression
+                           (my-sandboxed-emacs expr root))))))
+#+end_src
+
+Adapters rewrite arguments only — they SHALL NOT execute anything:
+execution stays gptel's, after the rewrite. The shipped registry has a
+single entry for =Bash= (wrapping =:command= through the resolved
+backend), and a tool with no adapter fails closed — so dropping a new tool
+into the ~execute~ group never silently extends the sandbox to it.
+
 ** srt backend (opt-in)
 
 Set =gptel-permit-sandbox-backend= to ='srt= to run the Anthropic
@@ -352,26 +467,35 @@ sandbox-runtime CLI instead. gptel-permit maps its defcustoms to srt's
 settings JSON (=filesystem.allowWrite=, =filesystem.denyRead=/
 =filesystem.denyWrite=, =network.allowedDomains=) into
 =/tmp/gptel-permit-srt-settings.json= and wraps commands as
-=srt --settings FILE bash -c '…'=.
+=srt --settings FILE bash -c '…'=. With the default ~auto~, srt is what
+macOS and Windows resolve to; on Linux it is your explicit opt-in.
 
 Note: on Linux, srt still requires node, socat and ripgrep for its network
 proxy layer (the unofficial PyPI =sandbox-runtime= port has the same
-requirements), so it is not a lighter path than the builtin backend. The
+requirements), so it is not a lighter path than the =bwrap= backend. The
 srt backend ships documented-but-untested.
 
 ** Known limitations
 
-- Linux only in the builtin backend: bwrap does not exist on mac/windows
-  (the srt backend adds macOS Seatbelt support).
+- The =bwrap= backend is Linux-only (bubblewrap does not exist on
+  macOS/Windows); with the default ~auto~ those platforms resolve to =srt=
+  for their Seatbelt isolation.
 - Mandatory read-only binds cover only paths that exist at wrap time
   (bubblewrap limitation); a shell rc file created later is not protected.
+- A protected path that is a symlink is bound at its /target/ (bubblewrap
+  refuses to mount onto a symlink destination, which would otherwise abort
+  the whole invocation): a stow- or chezmoi-managed =~/.zshrc= is
+  protected, and writes through the link are refused like writes to the
+  target.
 - No syscall filtering (no seccomp), no per-domain network filtering in the
-  builtin backend (network is binary on/off).
-- Sandbox covers :command-bearing (Bash-style) tools only. =Write=,
-  =Edit=, =Insert=, =Mkdir= and =Eval= run in-process and are not covered.
+  =bwrap= backend (network is binary on/off).
+- Sandbox covers :command-bearing (Bash-style) tools only — those with a
+  registered adapter. =Write=, =Edit=, =Insert=, =Mkdir= and =Eval= run
+  in-process and are not covered; the adapter registry is the extension
+  point for wrapping more tools (see [[*Tool adapters][Tool adapters]]).
 - Reads are unrestricted inside the sandbox; only writes outside writable
   dirs and network differ from the host.
-- Boundary-error detection (for the retry counter) matches common OS error
+- Boundary-error detection (for the retry latch) matches common OS error
   strings in tool results and is heuristic.
 
 * LLM Judge (opt-in)

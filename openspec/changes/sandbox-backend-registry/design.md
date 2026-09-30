@@ -40,7 +40,7 @@ possibly-edited tool call lists; `gptel-tool-call-actions-map` binds
 ## Decisions
 
 1. **Backend contract: EIEIO classes + generic functions (CLOS).**
-   Base class `gptel-permit-sandbox-backend` (stateless, no slots). The
+   Base class `gptel-permit-sandbox-backend-base` (stateless, no slots). The
    contract is two `cl-defgeneric`s:
 
    ```elisp
@@ -55,7 +55,7 @@ possibly-edited tool call lists; `gptel-tool-call-actions-map` binds
    ```elisp
    ;; gptel-permit-sandbox-bwrap.el
    (defclass gptel-permit-sandbox-backend-bwrap
-     (gptel-permit-sandbox-backend) ())
+     (gptel-permit-sandbox-backend-base) ())
    (cl-defmethod gptel-permit-sandbox-available-p
      ((_ gptel-permit-sandbox-backend-bwrap))
      (and (memq system-type '(gnu/linux)) (executable-find "bwrap")))
@@ -67,7 +67,7 @@ possibly-edited tool call lists; `gptel-tool-call-actions-map` binds
    `add-to-list`:
 
    ```elisp
-   (defclass my-nsjail-backend (gptel-permit-sandbox-backend) ())
+   (defclass my-nsjail-backend (gptel-permit-sandbox-backend-base) ())
    (cl-defmethod gptel-permit-sandbox-available-p ((_ my-nsjail-backend))
      (executable-find "nsjail"))
    (cl-defmethod gptel-permit-sandbox-wrap ((_ my-nsjail-backend) command root)
@@ -88,29 +88,47 @@ possibly-edited tool call lists; `gptel-tool-call-actions-map` binds
    *Alternative rejected:* `cl-defstruct` with function slots — typed but
    the contract is not named/discoverable, and method dispatch is manual.
 
-2. **Stock backends in their own modules.**
+   *Naming constraint (found during implementation):* the base class
+   cannot be called `gptel-permit-sandbox-backend` — EIEIO's `defclass`
+   binds the class name as a variable (to the class symbol), and the
+   binding wins whichever order it and the `defcustom` run in. The
+   collision silently reset that option's value to the class symbol, so
+   `auto` never resolved while explicitly-set backends kept working (every
+   test that let-binds the option passed). Hence `…-base`, pinned by the
+   `gptel-permit-sandbox-default-option-is-auto` regression test. Any new
+   class must avoid colliding with a variable or option name.
+
+2. **Stock backends in their own modules, lazily required.**
    `gptel-permit-sandbox-bwrap.el` / `gptel-permit-sandbox-srt.el`: each
    defines its class, its two methods, and appends its entry to
-   `gptel-permit-sandbox-backends` at load. `gptel-permit-sandbox.el`
-   `require`s both (they are tiny, pure, and dependency-free); the defcustom
-   default is built after the requires so the default registry is
-   `((bwrap . gptel-permit-sandbox-backend-bwrap)
-   (srt . gptel-permit-sandbox-backend-srt))`. The core retains the
-   registry, resolver, adapter dispatch, latch, and hotkey — no
-   backend-specific argv construction. AGENTS.org's project-structure list
-   gains the two files.
+   `gptel-permit-sandbox-backends` at load. The core does NOT require the
+   two modules at load time — instead it keeps a constant feature table
+   `gptel-permit--sandbox-backend-features` mapping backend symbol →
+   feature name (`(bwrap . gptel-permit-sandbox-bwrap)`), and resolution /
+   dispatch lazily `(require feature nil t)` on first use. Core never
+   names a class; the two files are loaded the first time a sandboxed
+   call needs them (or earlier if the user requires them). The registry
+   defcustom default names the class *symbols* as inert printable data —
+   looking up a class whose file has not loaded triggers the lazy
+   require before instantiation. The core retains the registry, resolver,
+   adapter dispatch, latch, and hotkey — no backend-specific argv
+   construction. AGENTS.org's project-structure list gains the two files.
 
-3. **`auto` resolver is a function over the registry, memoized per session.**
-   `gptel-permit--sandbox-resolve-backend`: `gnu/linux` → `bwrap`; otherwise
-   first registered backend (registry order) whose available-p method
-   returns non-nil, else nil. Memoize the result; re-resolve when
-   `gptel-permit-sandbox-backends` changes (defcustom setter) — availability
-   is re-verified at wrap time per call, so memoization only affects
-   *choice*, not safety. Resolution is logged.
-   *Why a platform check at all:* bwrap needs Linux user namespaces; srt is
-   the cross-platform candidate. Non-Linux + no available backend → nil →
-   fail-closed with a clear message, instead of silently claiming
-   `builtin` and failing on every call.
+3. **`auto` is a static platform table, resolved per call.**
+   `gptel-permit--sandbox-auto-prefs`: `gnu/linux` → `bwrap`;
+   `darwin`, `windows-nt` → `srt`; anything else → nil. Resolution is a
+   pure per-call function: table lookup (nil on unknown platform) →
+   lazy require of the backend module → registry lookup → `available-p`
+   → symbol or nil. No memoization: `executable-find` is a handful of
+   stat calls per sandboxed call, and per-call re-resolution means a
+   binary installed later is picked up without a restart (and one
+   removed later fails closed at once). No cross-fallback: Linux with a
+   missing bwrap binary resolves nil even if srt is installed —
+   deterministic beats clever, and the log message names the backend
+   that was tried. Third-party backends participate in `auto` only via
+   the registry default being *scanned by the user choosing an explicit
+   option value*, not automatically: an overridden platform pick is the
+   documented path. Resolution (symbol or its unavailability) is logged.
 
 4. **Tool adapters stay function-valued — deliberate asymmetry.**
    `gptel-permit-sandbox-adapters`: `"Bash" → (:wrap-args (args root) →
@@ -138,6 +156,13 @@ possibly-edited tool call lists; `gptel-tool-call-actions-map` binds
    *Why `./` prefix:* matches the mental model of `.gitignore`-style
    project-relative paths and needs no new syntax. Nonexistent entries are
    still skipped at wrap time (bwrap can only bind existing paths).
+   *Symlinked entries (found by the task 7.4 manual pass):* the bwrap
+   backend binds a path whose final component is a symlink at its target.
+   bubblewrap refuses a symlink destination ("Can't mount on symlink
+   destination") and aborts the whole invocation, so a single stow- or
+   chezmoi-managed `~/.zshrc` in the rc-file list used to break every
+   sandboxed command. Binding the target is also the stronger protection:
+   that is the file a write through the link touches.
 
 6. **Sticky latch + explicit reset.** On reaching
    `gptel-permit-sandbox-retry-limit` consecutive boundary failures, set
@@ -191,11 +216,24 @@ possibly-edited tool call lists; `gptel-tool-call-actions-map` binds
 - [EIEIO ceremony discourages casual backends] → Accepted: sandboxing is
   security-relevant infrastructure, not a quick hook; the shipped
   bwrap/srt classes double as copy-paste templates in the README.
-- [Memoized `auto` picks a backend that later disappears] → Availability
-  is re-checked at every wrap; a missing binary fails closed per call.
+- [Memoized `auto` picks a backend that later disappears] → Moot after
+  revision: there is no memoization; availability is re-checked per call
+  (`executable-find` each time), and the resolver re-resolves per call too.
 - [Latch makes an unattended session stall on sandboxed calls] → That is
   the intended triage semantics; the message names `gptel-permit-sandbox-reset`
   and the README documents auto-clearing on first success.
+- [A class name collides with a variable or option name] → EIEIO's
+  `defclass` binds the class name as a variable holding the class symbol,
+  silently overwriting the colliding option (this is exactly how the
+  original `gptel-permit-sandbox-backend` base class broke `auto`). The base
+  class is `gptel-permit-sandbox-backend-base`, and the option's default is
+  pinned by a regression test; new classes must not reuse an option's name.
+- [A symlinked protected path aborts the whole sandboxed invocation] →
+  Fixed in the bwrap backend (`gptel-permit-sandbox--bind-dests` resolves a
+  symlinked destination to its target); pinned by an ERT test and by the
+  manual pass. The general bubblewrap rule (destination's final component
+  only; symlinked parents and sources are fine) was verified against a real
+  bwrap.
 
 ## Migration Plan
 
@@ -208,9 +246,11 @@ possibly-edited tool call lists; `gptel-tool-call-actions-map` binds
 
 ## Open Questions
 
-- Should `gptel-permit-sandbox-backend` accept arbitrary registry symbols
+- ~~Should `gptel-permit-sandbox-backend` accept arbitrary registry symbols
   directly (validate against `gptel-permit-sandbox-backends` at customize
-  time)? Leaning yes — the defcustom type becomes a symbol choice with a
-  dynamic completion list, defaulting `auto`.
+  time)?~~ Resolved: no validation. With lazy loading an "unknown" symbol is
+  self-healing (first dispatch requires its file), so customize-time
+  validation adds ceremony for little protection; the type is a plain
+  symbol with a docstring, `auto` as default.
 - Persistent sandboxed Emacs for the future Eval adapter (daemon vs
   per-call `--batch`): deferred to the Eval adapter change.

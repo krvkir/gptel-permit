@@ -568,7 +568,7 @@ runs sandboxed."
     (setq gptel-permit-analytics--registered t
           gptel-permit-analytics-enabled t
           gptel-permit-analytics-sample-rate 1.0)
-    (let ((gptel-permit-sandbox-backend 'builtin)
+    (let ((gptel-permit-sandbox-backend 'bwrap)
           (gptel-permit-sandbox-command "bwrap")
           (gptel-permit-sandbox-writable-dirs '("/tmp"))
           (gptel-permit-sandbox-network t)

@@ -113,7 +113,9 @@ Default rules:
   - Auto-allow read tools accessing paths inside the project.
   - Ask for write tools accessing paths inside the project.
   - Ask for write tools with path-traversal (.. or absolute).
-  - Ask for any tool accessing protected directories.
+  - Ask for any tool accessing protected directories
+    (`gptel-permit-protected-dirs'; the default includes the
+    project-relative `./.git').
 
 Customize this variable or override it in your init file."
   :type '(repeat
@@ -148,9 +150,16 @@ Customize this variable or override it in your init file."
 Each rule is a plist of the form:
   (:tool <tool-name> :conditions ((<arg-name> . <regexp>) ...) :action <allow/deny/ask>)")
 
-(defcustom gptel-permit-protected-dirs '("~/.ssh/" "~/.gnupg/")
+(defcustom gptel-permit-protected-dirs '("~/.ssh/" "~/.gnupg/" "./.git")
   "Directories that always require confirmation for tool-call access.
-Used by the `:inside-protected-dirs' predicate in permission rules."
+Used by the `:inside-protected-dirs' predicate in permission rules and
+by the sandbox's mandatory read-only binds.
+
+An entry starting with \"./\" is resolved relative to the project root
+(`gptel-permit--project-root', falling back to `default-directory'), so
+the default `./.git' protects the current project's repository with the
+same single option that guards home-directory paths.  All other entries
+are resolved with `expand-file-name' (`~' etc.)."
   :type '(repeat directory)
   :group 'gptel-permit)
 
@@ -222,6 +231,23 @@ belonging to that group."
         (bfn (buffer-file-name)))
     (or (and pr (project-root pr))
         (and bfn (file-name-directory bfn)))))
+
+(defun gptel-permit--expand-protected-dir (dir &optional root)
+  "Expand a protected-dirs entry DIR, or nil when DIR is not a string.
+An entry starting with \"./\" resolves against the project root ROOT,
+else `gptel-permit--project-root', else `default-directory'; every
+other entry goes through `expand-file-name' (`~', absolute paths)."
+  (when (stringp dir)
+    (let ((root (or root (gptel-permit--project-root))))
+      (if (string-prefix-p "./" dir)
+          (cond (root (directory-file-name
+                       (expand-file-name (substring dir 2) root)))
+                ;; No project context: fall back to `default-directory',
+                ;; keeping the entry's meaning as "relative to where we run".
+                (t (directory-file-name (expand-file-name
+                                         (substring dir 1)
+                                         default-directory))))
+        (expand-file-name dir)))))
 
 (defun gptel-permit--processed-p (tool-call)
   "Return non-nil if TOOL-CALL has already been processed or errored."
@@ -324,9 +350,12 @@ names, missing required arguments, and unknown argument names."
     (and root (not (file-in-directory-p (format "%s" expanded) root)))))
 
 (defun gptel-permit--inside-protected-dirs-p (expanded _raw _tool-call)
-  "Return non-nil if expanded path EXPANDED is inside a protected directory."
+  "Return non-nil if expanded path EXPANDED is inside a protected directory.
+Protected-dirs entries are expanded with
+`gptel-permit--expand-protected-dir' (the `./' prefix is
+project-root-relative), shared verbatim with the sandbox."
   (cl-some (lambda (d)
-             (let ((pd (expand-file-name d))
+             (let ((pd (gptel-permit--expand-protected-dir d))
                    (tg (format "%s" expanded)))
                (or (file-in-directory-p tg pd)
                    (file-in-directory-p pd tg))))
