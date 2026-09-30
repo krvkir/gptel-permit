@@ -139,6 +139,25 @@ as an event, not a terminal outcome (gptel permits resuming canceled calls).
 - WHEN the user accepts via the overlay key at T1
 - THEN a decision event records `allow` and wait-ms T1−T0.
 
+### Requirement: Decision correlation across arg rewrites
+The decision event SHALL still correlate with the original confirm event when
+a tool call's arguments are rewritten between the confirmation event
+and the user (or programmatic) acceptance — e.g. interactive sandboxed
+acceptance wrapping `:command` via `gptel-permit-accept-tool-calls-sandboxed`
+(the pending-confirmation entry SHALL be popped with the pre-rewrite
+arguments), so wait-time statistics remain correct. The rewrite itself
+SHALL be recorded by carrying the wrapped arguments in the decision event's
+tool-call payload, keeping the decision auditable against what actually ran.
+
+#### Scenario: Sandbox hotkey decision correlates
+- GIVEN analytics enabled and a pending Bash confirmation with args
+  `(:command "make test")`
+- WHEN the user accepts via `C-c C-s` and the sandboxed command runs
+- THEN a decision event records `allow` with the correct wait-ms from the
+  original confirm timestamp
+- AND the decision event's payload carries the wrapped command string, not
+  the original.
+
 ### Requirement: Statistics computation and report
 `gptel-permit-analytics-compute` SHALL read the JSONL file and return a pure
 data structure with: total calls, auto-allowed count, asked count, blocked

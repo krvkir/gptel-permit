@@ -97,7 +97,7 @@ settings-file mapping semantics are unchanged.
 The sandbox SHALL dispatch all wrapping through
 `gptel-permit-sandbox-backends`: an alist mapping a backend symbol to the
 backend's class, where every backend class is a subclass of
-`gptel-permit-sandbox-backend` implementing two generic operations —
+`gptel-permit-sandbox-backend-base` implementing two generic operations —
 `gptel-permit-sandbox-available-p (backend)` (can this backend run here?)
 and `gptel-permit-sandbox-wrap (backend command root)` (return the sandboxed
 invocation string). The shipped registry SHALL contain `bwrap` and `srt`;
@@ -107,8 +107,17 @@ shipped entries. An unknown backend symbol SHALL fail closed with
 be documented as security-relevant: a wrap method's output runs without
 further confirmation, so a broken wrapper effectively disables sandboxing.
 
+Note: the base class MUST be named `gptel-permit-sandbox-backend-base`, NOT
+`gptel-permit-sandbox-backend`. EIEIO's `defclass` binds the class name as a
+variable holding the class symbol, which silently clobbers the
+`gptel-permit-sandbox-backend` option of the same name: the option then never
+equals `auto` (or any user value) and every default-path resolution returns
+nothing. The clobbering happens regardless of definition order and emits no
+byte-compile warning; `gptel-permit-sandbox-default-option-is-auto` pins the
+regression.
+
 #### Scenario: Custom backend participates
-- GIVEN a user defines a subclass of `gptel-permit-sandbox-backend`
+- GIVEN a user defines a subclass of `gptel-permit-sandbox-backend-base`
   implementing both generics, registers it as `my-sandbox`, and sets
   `gptel-permit-sandbox-backend` to `my-sandbox`
 - WHEN a sandbox rule matches a Bash call

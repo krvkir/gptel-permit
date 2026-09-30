@@ -70,6 +70,15 @@ The built-in predicates SHALL include:
 - `:inside-protected-dirs` — true if the normalized path is inside any directory listed in `gptel-permit-protected-dirs`.
 - `:path-traversal` — true if the path contains `..` or is absolute.
 
+Protected-dir entries beginning with `./` SHALL be resolved relative to the
+project root (`gptel-permit--project-root`, falling back to
+`default-directory`) via `gptel-permit--expand-protected-dir`; all other
+entries SHALL be resolved with `expand-file-name`. The same resolution
+SHALL be used by the sandbox's protected-path binding, so a single
+`gptel-permit-protected-dirs` entry governs both rule matching and
+sandboxing. The default value of `gptel-permit-protected-dirs` SHALL
+include `./.git`.
+
 When the predicate keyword does not match any entry, the condition SHALL fail with a logged warning.
 
 #### Scenario: inside-project on a file in the project root
@@ -94,6 +103,22 @@ When the predicate keyword does not match any entry, the condition SHALL fail wi
   `gptel-permit--condition-predicates`
 - WHEN a rule uses condition value `:inside-secrets`
 - THEN the engine SHALL call `my-secrets-p` for the match.
+
+#### Scenario: inside-protected-dirs containment check
+- GIVEN `gptel-permit-protected-dirs` is `("~/.ssh/" "~/.gnupg/")`
+- AND a tool-call has `:path "/home/user/.ssh/config"`
+- WHEN the predicate `:inside-protected-dirs` is resolved
+- THEN `expand-file-name` resolves the path and each protected dir entry
+- AND `file-in-directory-p` of the expanded path against "~/.ssh/" returns t
+- AND the predicate SHALL return t.
+
+#### Scenario: project-relative protected entry
+- GIVEN `gptel-permit-protected-dirs` is `("./.git" "~/.ssh/")` and the
+  project root is "/home/user/proj/"
+- AND a tool-call has `:path "/home/user/proj/.git/hooks/pre-commit"`
+- WHEN the predicate `:inside-protected-dirs` is resolved
+- THEN "./.git" resolves to "/home/user/proj/.git"
+- AND the predicate SHALL return t.
 
 ### Requirement: Match Algorithm — First Match Wins
 The rule engine SHALL evaluate rules in order: session-local rules (`gptel-permit-rules`) first, then global rules (`gptel-permit-global-rules`). The action of the /first/ rule where all conditions match SHALL be returned. No further rules SHALL be evaluated after a match.
