@@ -25,7 +25,12 @@ them afterwards; BODY activates capture itself by setting the
 registered/enabled flags or calling the register function."
   (declare (indent 0))
   `(let ((gptel-permit-analytics-file (gptel-permit-analytics-test--fresh-file))
-         (gptel-permit-analytics-sample-rate 0.2)
+         ;; Ambient rate 0.0: the audit predicate is installed for every
+         ;; test, so a nonzero default here would let sampling fire at
+         ;; random and break tests that expect an auto-allow to survive.
+         ;; Tests that exercise sampling bind their own rate (and pin
+         ;; `random') explicitly.
+         (gptel-permit-analytics-sample-rate 0.0)
          (gptel-permit-analytics-enabled nil)
          (gptel-permit-analytics--registered nil)
          (gptel-permit-analytics--pending nil))
