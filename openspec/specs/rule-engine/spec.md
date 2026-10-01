@@ -12,6 +12,14 @@ A rule SHALL be a plist with keys `:tool`, `:tool-group`, `:conditions`, and `:a
   called as `(funcall VALUE arg-value tool-call)` whose non-nil return means
   the condition matches.
 
+`:action` SHALL be one of the action symbols `allow`, `deny`, `ask`,
+`sandbox`; the symbol `judge`; or a judge list — a list whose first
+element is `judge` followed by one or two action symbols from
+`allow`/`deny`/`ask`/`sandbox` (`judge` ≡ `(judge allow ask)`,
+`(judge A)` ≡ `(judge A ask)`). Judge actions are resolved by the judge
+capability; malformed judge forms SHALL behave as `ask` with a logged
+warning.
+
 When `:tool` and `:tool-group` are both present in a rule, `:tool` SHALL take precedence and a warning SHALL be emitted.
 
 When neither `:tool` nor `:tool-group` is present, the rule SHALL match any tool.
@@ -29,6 +37,13 @@ When neither `:tool` nor `:tool-group` is present, the rule SHALL match any tool
 - THEN it SHALL resolve "Read" → tool-group "read", `:file_path` → arg-group "path"
 - AND test regexp "secret" against "/tmp/secret.txt" → match
 - AND return `deny`.
+
+#### Scenario: Judge action list form
+- GIVEN the rule `(:tool "Bash" :conditions ((:command . "^make ")) :action (judge sandbox deny))`
+- WHEN matched against a Bash tool call with `:command "make test"`
+- THEN the rule SHALL match on its conditions and its resolution SHALL be
+  the judge's verdict applied to the two actions (sandbox on SAFE, deny on
+  UNSAFE) — evaluation of later rules stops, as with any matched rule.
 
 #### Scenario: Callable condition matches
 - GIVEN a rule `(:tool-group execute :conditions ((:command . my-safe-p)) :action sandbox)`
@@ -208,6 +223,13 @@ A handler SHALL be called with `(ID TOOL-CALL)` — the tool-call id and
 the enriched tool call — and SHALL return a verdict plist per the gptel
 hook protocol, or nil to defer.
 
+When the matched action is a cons cell (a list form), the engine SHALL
+dispatch on its car and SHALL call the handler with the action's cdr as a
+third argument: `(funcall handler id tool-call (cdr action))`. A handler
+that cannot accept the third argument signals an error, which the engine's
+existing error containment SHALL turn into the fail-closed verdict
+`(:confirm t)`. Bare-symbol actions SHALL keep the two-argument call.
+
 The built-in actions SHALL be pre-registered with these verdicts:
 - `allow` → `(:confirm nil)` (auto-approve),
 - `deny` → `(:block "auto-denied")` (reject),
@@ -231,6 +253,14 @@ non-matching call.
 - THEN the handler SHALL be invoked with the call's id and enriched call
 - AND the hook SHALL return `(:confirm nil)`.
 
+#### Scenario: List action passes its cdr to the handler
+- GIVEN `gptel-permit-action-handlers` contains an entry mapping `judge` to
+  a handler of three arguments
+- AND a rule matching the call with `:action (judge sandbox deny)`
+- WHEN the engine processes the call
+- THEN the handler SHALL be invoked with the call's id, the enriched call,
+  and the list `(sandbox deny)` as its third argument.
+
 #### Scenario: Unregistered action fails closed
 - GIVEN a matching rule with `:action frobnicate`
 - AND no `frobnicate` entry in `gptel-permit-action-handlers`
@@ -251,3 +281,19 @@ non-matching call.
 - WHEN such a call matches its rule
 - THEN the engine SHALL return nil and gptel's `:confirm` fallthrough
   SHALL apply.
+
+### Requirement: Programmatic tool-call resolution flag
+The core SHALL own a dynamic variable `gptel-permit--programmatic-call`
+that rule-action implementations bind non-nil while programmatically
+accepting or rejecting prompted tool calls (e.g. around a programmatic
+`gptel--accept-tool-calls`). Its documentation SHALL describe the flag
+generically — advice and hooks may use it to distinguish programmatic
+resolutions from interactive user approvals — and SHALL NOT name any
+optional module. The core SHALL never set the flag itself outside of
+providing its default (nil); only action implementations bind it.
+
+#### Scenario: Flag is core-owned and module-agnostic
+- GIVEN the core library loaded with no optional module
+- WHEN `gptel-permit--programmatic-call` is inspected
+- THEN it is defined, defaults to nil, and its docstring mentions no
+  add-on module by name.
