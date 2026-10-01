@@ -150,7 +150,7 @@ Customize this variable or override it in your init file."
 Each rule is a plist of the form:
   (:tool <tool-name> :conditions ((<arg-name> . <regexp>) ...) :action <allow/deny/ask>)")
 
-(defcustom gptel-permit-protected-dirs '("~/.ssh/" "~/.gnupg/" "./.git")
+(defcustom gptel-permit-protected-dirs '("~/.ssh/" "~/.gnupg/")
   "Directories that always require confirmation for tool-call access.
 Used by the `:inside-protected-dirs' predicate in permission rules and
 by the sandbox's mandatory read-only binds.
