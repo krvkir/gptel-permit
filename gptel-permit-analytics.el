@@ -191,13 +191,25 @@ the analytics module allocates no ids of its own."
         (args . ,(gptel-permit-analytics--args-alist
                   (plist-get tool-call :args))))))))
 
+(defun gptel-permit-analytics--scope-fields (tool-call)
+  "Return the `scope' field alist for TOOL-CALL, or nil when absent.
+The scope is read off the enriched tool call's `:rule-scope'
+annotation (the rule engine's match annotation) at emission time, and
+serialized as a string with `symbol-name'.  Omitted — not empty —
+when no rule matched, which is exactly the shape of every record
+written before scopes existed."
+  (when-let* ((scope (plist-get tool-call :rule-scope)))
+    `((scope . ,(symbol-name scope)))))
+
 (defun gptel-permit-analytics--emit-rule-match (tool-call id action)
-  "Append a rule-match event when a rule with ACTION matched TOOL-CALL."
+  "Append a rule-match event when a rule with ACTION matched TOOL-CALL.
+The record carries the matched rule's scope when one matched."
   (when (and id action)
     (gptel-permit-analytics--append-line
      (gptel-permit-analytics--base-event
       "rule-match" (plist-get tool-call :name) id
-      `((action . ,(gptel-permit-analytics--action-string action)))))))
+      `((action . ,(gptel-permit-analytics--action-string action))
+        ,@(gptel-permit-analytics--scope-fields tool-call))))))
 
 (defun gptel-permit-analytics--judge-fields ()
   "Return judge fields for the verdict event, or nil when absent.
@@ -222,6 +234,7 @@ and VERDICT is the verdict plist computed from it."
      (gptel-permit-analytics--base-event
       "verdict" (plist-get tool-call :name) id
       `((action . ,(gptel-permit-analytics--action-string action))
+        ,@(gptel-permit-analytics--scope-fields tool-call)
         ,@(when (and (consp verdict) (plist-get verdict :confirm))
             '((confirm . t)))
         ,@(when-let* ((blocked (and (consp verdict) (plist-get verdict :block))))

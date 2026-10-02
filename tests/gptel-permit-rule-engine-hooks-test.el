@@ -250,6 +250,112 @@ hook returns nil (defer)."
 ;; Events chains
 ;; -------------------------------------------------------------------
 
+;; -------------------------------------------------------------------
+;; Matched scope and origin ride the tool call
+;; -------------------------------------------------------------------
+
+(ert-deftest gptel-permit-scope-annotation-observable-at-events ()
+  "An observer sees :rule-scope and :rule-origin on the tool call both
+at the :rule-match event and at :verdict; the payload shapes are
+unchanged (nil for :tool-call, the action symbol for :rule-match,
+(ACTION . VERDICT) for :verdict)."
+  (let* ((seen nil)
+         (gptel-permit-events-functions
+          (list (lambda (_id tc type payload)
+                  (push (list type payload
+                              (plist-get tc :rule-scope)
+                              (plist-get tc :rule-origin))
+                        seen))))
+         (gptel-permit-rules nil)
+         (gptel-permit-global-rules nil)
+         (gptel-permit-rule-scopes
+          `((session :reader gptel-permit--read-session-rules
+                     :writer gptel-permit--write-session-rule)
+            (notebook :reader ,(lambda () '((:tool "Bash" :action ask)))
+                      :writer gptel-permit--write-notebook-rule)
+            (global :reader gptel-permit--read-global-rules
+                    :writer gptel-permit--write-global-rule))))
+    (should (equal (gptel-permit--apply-rules
+                    (list :name "Bash" :args '(:command "ls")))
+                   '(:confirm t)))
+    (should (equal (nreverse seen)
+                   '((:tool-call nil nil nil)
+                     (:rule-match ask notebook (:scope notebook))
+                     (:verdict (ask :confirm t) notebook (:scope notebook))
+                     (:confirm nil notebook (:scope notebook)))))))
+
+(ert-deftest gptel-permit-scope-origin-rides-with-project-scope ()
+  "A rule from a project store: the call carries scope `project' and an
+origin naming that store file, from the :rule-match event onward."
+  (let* ((seen nil)
+         (gptel-permit-events-functions
+          (list (lambda (_id tc type _pl)
+                  (push (list type
+                              (plist-get tc :rule-scope)
+                              (plist-get tc :rule-origin))
+                        seen))))
+         (gptel-permit-rules nil)
+         (gptel-permit-global-rules nil)
+         (gptel-permit-rule-scopes
+          `((project :reader ,(lambda ()
+                                '((:tool "Bash" :action allow
+                                         :origin (:scope project
+                                                         :file "/proj/gui/.gptel-permit-rules"))))
+                     :writer gptel-permit--write-project-rule))))
+    (should (equal (gptel-permit--apply-rules
+                    (list :name "Bash" :args '(:command "ls")))
+                   '(:confirm nil)))
+    (should (equal (nreverse seen)
+                   '((:tool-call nil nil)
+                     (:rule-match project
+                      (:scope project :file "/proj/gui/.gptel-permit-rules"))
+                     (:verdict project
+                      (:scope project :file "/proj/gui/.gptel-permit-rules")))))))
+
+(ert-deftest gptel-permit-scope-no-match-no-annotation ()
+  "No match: neither :rule-scope nor :rule-origin is reported on the
+call, and the :rule-match event carries a nil action."
+  (let* ((seen nil)
+         (gptel-permit-events-functions
+          (list (lambda (_id tc type payload)
+                  (push (list type payload
+                              (plist-member tc :rule-scope)
+                              (plist-member tc :rule-origin))
+                        seen))))
+         (gptel-permit-rules nil)
+         (gptel-permit-global-rules nil)
+         (gptel-permit-rule-scopes
+          `((session :reader gptel-permit--read-session-rules
+                     :writer gptel-permit--write-session-rule)
+            (global :reader gptel-permit--read-global-rules
+                    :writer gptel-permit--write-global-rule))))
+    (should (null (gptel-permit--apply-rules
+                   (list :name "Read" :args '(:file_path "x.txt")))))
+    (should (equal (nreverse seen)
+                   '((:tool-call nil nil nil)
+                     (:rule-match nil nil nil)
+                     ;; the no-match verdict payload is (cons nil nil):
+                     (:verdict (nil) nil nil))))))
+
+(ert-deftest gptel-permit-scope-payload-shapes-unchanged ()
+  "A matching allow rule in the project scope: the :rule-match payload
+is the action symbol, :tool-call's payload is nil and the :verdict
+payload is (allow . (:confirm nil))."
+  (let* ((seen nil)
+         (gptel-permit-events-functions
+          (list (lambda (_id _tc type payload)
+                  (push (cons type payload) seen))))
+         (gptel-permit-rule-scopes
+          `((project :reader ,(lambda () '((:tool "Bash" :action allow)))
+                     :writer gptel-permit--write-project-rule))))
+    (should (equal (gptel-permit--apply-rules
+                    (list :name "Bash" :args '(:command "ls")))
+                   '(:confirm nil)))
+    (should (equal (nreverse seen)
+                   '((:tool-call)
+                     (:rule-match . allow)
+                     (:verdict . (allow :confirm nil)))))))
+
 (ert-deftest gptel-permit-events-allow-chain-order ()
   "An allow chain observes :tool-call, :rule-match, :verdict — no
 :confirm — all with the same id and the enriched tool call."

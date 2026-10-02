@@ -749,6 +749,107 @@ from `ts'."
       (emit 16 "tool-call" "Eval")
       (emit 16 "verdict" "Eval" '(action . "none")))))
 
+;; -------------------------------------------------------------------
+;; Scope field on rule-match and verdict events
+;; -------------------------------------------------------------------
+
+(ert-deftest gptel-permit-analytics-scope-recorded-on-matched-events ()
+  "The rule-match and verdict records carry `scope' with the matched
+rule's scope (a string); a no-match call carries no scope field."
+  (gptel-permit-analytics-test--with-file
+    (setq gptel-permit-analytics--registered t
+          gptel-permit-analytics-enabled t)
+    (let ((gptel-permit-rules nil)
+          (gptel-permit-global-rules nil)
+          (gptel-permit-rule-scopes
+           `((session :reader gptel-permit--read-session-rules
+                      :writer gptel-permit--write-session-rule)
+             (notebook :reader ,(lambda () '((:tool "Bash" :action ask)))
+                       :writer gptel-permit--write-notebook-rule)
+             (global :reader gptel-permit--read-global-rules
+                     :writer gptel-permit--write-global-rule))))
+      (should (equal (gptel-permit--apply-rules
+                      (list :name "Bash" :args '(:command "ls")))
+                     '(:confirm t))))
+    (let* ((events (gptel-permit-analytics-test--events
+                    gptel-permit-analytics-file))
+           (rm (cl-find "rule-match" events
+                        :key (lambda (e)
+                               (gptel-permit-analytics-test--field e 'type))
+                        :test #'equal))
+           (vd (cl-find "verdict" events
+                        :key (lambda (e)
+                               (gptel-permit-analytics-test--field e 'type))
+                        :test #'equal)))
+      (should (equal (gptel-permit-analytics-test--field rm 'scope) "notebook"))
+      (should (equal (gptel-permit-analytics-test--field vd 'scope) "notebook"))))
+  ;; No match: neither event carries scope; verdict action stays "none".
+  (gptel-permit-analytics-test--with-file
+    (setq gptel-permit-analytics--registered t
+          gptel-permit-analytics-enabled t)
+    (let ((gptel-permit-rules nil)
+          (gptel-permit-global-rules nil)
+          (gptel-permit-rule-scopes
+           `((session :reader gptel-permit--read-session-rules
+                      :writer gptel-permit--write-session-rule)
+             (global :reader gptel-permit--read-global-rules
+                     :writer gptel-permit--write-global-rule))))
+      (should (null (gptel-permit--apply-rules
+                     (list :name "Read" :args '(:file_path "x.txt"))))))
+    (let* ((events (gptel-permit-analytics-test--events
+                    gptel-permit-analytics-file))
+           (rm (cl-find "rule-match" events
+                        :key (lambda (e)
+                               (gptel-permit-analytics-test--field e 'type))
+                        :test #'equal))
+           (vd (cl-find "verdict" events
+                        :key (lambda (e)
+                               (gptel-permit-analytics-test--field e 'type))
+                        :test #'equal)))
+      (should (null (gptel-permit-analytics-test--field rm 'scope)))
+      (should (null (gptel-permit-analytics-test--field vd 'scope)))
+      (should (equal (gptel-permit-analytics-test--field vd 'action)
+                     "none")))))
+
+(ert-deftest gptel-permit-analytics-scope-and-legacy-fold ()
+  "Records without a `scope' field (pre-scope logs) fold into outcome
+rows with equal semantics, alongside scoped ones; the compute path is
+unchanged."
+  (let* ((file (gptel-permit-analytics-test--fresh-file))
+         (stats (unwind-protect
+                    (progn
+                      ;; Legacy chain (no scope): audited, cancelled.
+                      (gptel-permit-analytics-test--emit-fixture
+                       file 1 "tool-call" "Bash")
+                      (gptel-permit-analytics-test--emit-fixture
+                       file 1 "rule-match" "Bash" '(action . "allow"))
+                      (gptel-permit-analytics-test--emit-fixture
+                       file 1 "verdict" "Bash" '(action . "allow"))
+                      (gptel-permit-analytics-test--emit-fixture
+                       file 1 "audit" "Bash" '(rate . 0.2))
+                      (gptel-permit-analytics-test--emit-fixture
+                       file 1 "confirm" "Bash")
+                      (gptel-permit-analytics-test--emit-fixture
+                       file 1 "decision" "Bash"
+                       '(choice . "cancel") '(wait-ms . 100))
+                      ;; Scoped chain: notebook allow.
+                      (gptel-permit-analytics-test--emit-fixture
+                       file 2 "tool-call" "Read")
+                      (gptel-permit-analytics-test--emit-fixture
+                       file 2 "rule-match" "Read"
+                       '(action . "allow") '(scope . "notebook"))
+                      (gptel-permit-analytics-test--emit-fixture
+                       file 2 "verdict" "Read"
+                       '(action . "allow") '(scope . "notebook"))
+                      (gptel-permit-analytics-compute file))
+                  (delete-file file))))
+    (should (= (plist-get stats :total-calls) 2))
+    (should (= (plist-get stats :auto-allowed) 1))
+    (should (= (plist-get stats :asked) 1))
+    (should (= (plist-get stats :blocked) 0))
+    (should (= (plist-get (plist-get stats :false-allow) :audited) 1))
+    (should (= (plist-get (plist-get stats :false-allow) :overridden) 1))))
+
 (ert-deftest gptel-permit-analytics-compute-fixture ()
   "Compute derives totals, per-tool rows and the Wilson interval."
   (let* ((file (gptel-permit-analytics-test--fresh-file))

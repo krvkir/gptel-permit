@@ -113,20 +113,60 @@
     (should (null (gptel-permit--match-rule-p rule (gptel-permit--enrich-tool-call (list :name "Bash" :args '(:command "ls"))))))))
 
 ;; -------------------------------------------------------------------
-;; First match wins
+;; Rule scopes: registry order, cross-scope precedence
 ;; -------------------------------------------------------------------
 
+(defun gptel-permit-rule-engine-test--registry (session notebook project global)
+  "Registry like `gptel-permit-rule-scopes' with canned readers.
+Each of SESSION, NOTEBOOK, PROJECT and GLOBAL is the rule list the
+corresponding reader returns (or nil)."
+  `((session  :reader ,(lambda () session)
+              :writer gptel-permit--write-session-rule)
+    (notebook :reader ,(lambda () notebook)
+              :writer gptel-permit--write-notebook-rule)
+    (project  :reader ,(lambda () project)
+              :writer gptel-permit--write-project-rule)
+    (global   :reader ,(lambda () global)
+              :writer gptel-permit--write-global-rule)))
+
+(defun gptel-permit-rule-engine-test--clear-log ()
+  "Erase the `*gptel-permit-log*' buffer."
+  (with-current-buffer (get-buffer-create "*gptel-permit-log*")
+    (erase-buffer)))
+
+(defun gptel-permit-rule-engine-test--log ()
+  "Return the current contents of the `*gptel-permit-log*' buffer."
+  (with-current-buffer (get-buffer-create "*gptel-permit-log*")
+    (buffer-string)))
+
+(ert-deftest gptel-permit-scope-registry-order ()
+  "The scope registry lists session, notebook, project, global, in order,
+each entry carrying both a reader and a writer."
+  (should (equal (mapcar #'car gptel-permit-rule-scopes)
+                 '(session notebook project global)))
+  (should (cl-every (lambda (spec)
+                      (and (plist-get spec :reader)
+                           (plist-get spec :writer)))
+                    (mapcar #'cdr gptel-permit-rule-scopes))))
+
 (ert-deftest gptel-permit-rule-first-match-wins ()
-  "Session-local rules are checked before global rules."
+  "Session-local rules are checked before global rules; the return
+names the matching rule and its scope (RULE . SCOPE)."
   (let ((gptel-permit-rules
          '((:tool "Read" :conditions ((:file_path . "logs")) :action allow)))
         (gptel-permit-global-rules
-         '((:tool "Read" :conditions ((:file_path . "logs")) :action ask))))
-    (should (eq (gptel-permit--find-action
-                 "test-id"
-                 (gptel-permit--enrich-tool-call
-                  (list :name "Read" :args '(:file_path "logs/debug.txt"))))
-                'allow))))
+         '((:tool "Read" :conditions ((:file_path . "logs")) :action ask)))
+        (gptel-permit-notebook-rules nil))
+    (let* ((result (gptel-permit--find-action
+                    "test-id"
+                    (gptel-permit--enrich-tool-call
+                     (list :name "Read" :args '(:file_path "logs/debug.txt"))))))
+      (should (eq (cdr result) 'session))
+      (should (eq (plist-get (car result) :action) 'allow))
+      ;; The collection stays in registry order with no persisted stores:
+      ;; one session rule, one global rule.
+      (should (equal (mapcar #'cdr (gptel-permit--scoped-rules))
+                     '(session global))))))
 
 (ert-deftest gptel-permit-rule-no-match-fallback ()
   "When no rule matches, nil is returned."
@@ -136,6 +176,211 @@
                    "test-id"
                    (gptel-permit--enrich-tool-call
                     (list :name "Read" :args '(:file_path "random.txt"))))))))
+
+(ert-deftest gptel-permit-engine-scope-order-decides ()
+  "One matching rule per scope with different actions: the narrowest
+scope wins and the reported scope is that scope."
+  (with-temp-buffer
+    (let* ((scopes-seen nil)
+           (gptel-permit-events-functions
+            (list (lambda (_id tc type _pl)
+                    (when (eq type :rule-match)
+                      (push (plist-get tc :rule-scope) scopes-seen)))))
+           (gptel-permit-rule-scopes
+            (gptel-permit-rule-engine-test--registry
+             '((:tool "Bash" :action ask))
+             '((:tool "Bash" :action allow))
+             '((:tool "Bash" :action deny))
+             '((:tool "Bash" :action allow)))))
+      (should (equal (gptel-permit--apply-rules
+                      (list :name "Bash" :args '(:command "ls")))
+                     '(:confirm t)))
+      (should (equal scopes-seen '(session))))))
+
+(ert-deftest gptel-permit-engine-notebook-overrides-project-and-global ()
+  "A notebook rule outranks matching project and global rules."
+  (let* ((scopes-seen nil)
+         (gptel-permit-events-functions
+          (list (lambda (_id tc type _pl)
+                  (when (eq type :rule-match)
+                    (push (plist-get tc :rule-scope) scopes-seen)))))
+         (gptel-permit-rules nil)
+         (gptel-permit-global-rules '((:tool "Bash" :action ask)))
+         (gptel-permit-rule-scopes
+          (gptel-permit-rule-engine-test--registry
+           nil
+           '((:tool "Bash" :action allow))
+           '((:tool "Bash" :action ask))
+           gptel-permit-global-rules)))
+    (should (equal (gptel-permit--apply-rules
+                    (list :name "Bash" :args '(:command "ls")))
+                   '(:confirm nil)))
+    (should (equal scopes-seen '(notebook)))))
+
+(ert-deftest gptel-permit-engine-project-overrides-global ()
+  "A project rule (by tool-group) outranks a matching global allow."
+  (let* ((scopes-seen nil)
+         (gptel-permit-events-functions
+          (list (lambda (_id tc type _pl)
+                  (when (eq type :rule-match)
+                    (push (plist-get tc :rule-scope) scopes-seen)))))
+         (gptel-permit-rules nil)
+         (gptel-permit-global-rules
+          '((:tool-group read :action allow)))
+         (gptel-permit-rule-scopes
+          (gptel-permit-rule-engine-test--registry
+           nil nil
+           '((:tool-group read :action deny))
+           gptel-permit-global-rules)))
+    (should (equal (gptel-permit--apply-rules
+                    (list :name "Read" :args '(:file_path "x.txt")))
+                   '(:block "auto-denied")))
+    (should (equal scopes-seen '(project)))))
+
+(ert-deftest gptel-permit-engine-defer-only-after-every-scope-exhausted ()
+  "Every scope offers its rules before a later, matching one decides."
+  (let ((gptel-permit-rules
+         '((:tool "Bash" :conditions ((:command . "^no-match")) :action ask)))
+        (gptel-permit-global-rules
+         '((:tool "Bash" :conditions ((:command . "^run")) :action ask)))
+        (gptel-permit-rule-scopes
+         (gptel-permit-rule-engine-test--registry
+          '((:tool "Bash" :conditions ((:command . "^no-match")) :action ask))
+          '((:tool "Bash" :conditions ((:command . "^no-match")) :action ask))
+          '((:tool "Bash" :conditions ((:command . "^no-match")) :action ask))
+          '((:tool "Bash" :conditions ((:command . "^run")) :action ask)))))
+    (should (equal (gptel-permit--apply-rules
+                    (list :name "Bash" :args '(:command "run ls")))
+                   '(:confirm t)))))
+
+(ert-deftest gptel-permit-engine-no-persisted-rules-unchanged ()
+  "With no notebook property and no project store, the engine's verdicts
+are the session+global behavior that predates scopes."
+  (with-temp-buffer
+    (let ((gptel-permit-rules
+           '((:tool "Bash" :conditions ((:command . "^make")) :action allow)))
+          (gptel-permit-global-rules
+           '((:tool "Read" :conditions ((:file_path . ".*")) :action allow)
+             (:action ask)))
+          (gptel-permit-notebook-rules nil))
+      ;; The notebook and project readers find no storage in this buffer.
+      (should (null (gptel-permit--read-notebook-rules)))
+      (should (null (gptel-permit--read-project-rules)))
+      (should (equal (gptel-permit--apply-rules
+                      (list :name "Bash" :args '(:command "make test")))
+                     '(:confirm nil)))
+      ;; No tool-specific rule matches "other"; the universal global
+      ;; fallback (:action ask) decides — exactly as it did pre-change.
+      (should (equal (gptel-permit--apply-rules
+                      (list :name "Bash" :args '(:command "other")))
+                     '(:confirm t)))
+      (should (equal (gptel-permit--apply-rules
+                      (list :name "Read" :args '(:file_path "whatever")))
+                     '(:confirm nil))))))
+
+(ert-deftest gptel-permit-engine-scope-removal-disables-scope ()
+  "Removing a scope's entry from the registry disables the scope
+entirely: its store is not even read and its rules cannot decide."
+  (let* ((project-reads 0)
+         (gptel-permit-rules nil)
+         (gptel-permit-global-rules nil)
+         (counting-project
+          `((project :reader ,(lambda ()
+                                (cl-incf project-reads)
+                                '((:tool "Bash" :action allow)))
+                     :writer gptel-permit--write-project-rule)))
+         (no-project
+          (cl-remove-if (pcase-lambda (`(,scope . ,_))
+                          (eq scope 'project))
+                        (copy-sequence gptel-permit-rule-scopes))))
+    ;; With the entry present the counting reader is consulted and its
+    ;; allow rule decides:
+    (let ((gptel-permit-rule-scopes counting-project))
+      (should (equal (gptel-permit--apply-rules
+                      (list :name "Bash" :args '(:command "ls")))
+                     '(:confirm nil)))
+      (should (= project-reads 1)))
+    ;; With the entry removed the reader is never called and the same
+    ;; call defers:
+    (let ((gptel-permit-rule-scopes no-project))
+      (should (null (gptel-permit--apply-rules
+                     (list :name "Bash" :args '(:command "ls")))))
+      (should (= project-reads 1)))))
+
+(ert-deftest gptel-permit-engine-empty-scope-contributes-nothing ()
+  "Scopes without storage behave as if removed: matching proceeds over
+the remaining rules exactly the same."
+  (with-temp-buffer
+    (let ((gptel-permit-rules
+           '((:tool "Bash" :action ask)))
+          (gptel-permit-global-rules nil))
+      ;; Every canned reader returns nil: the empty scopes vanish and
+      ;; only the session rule is collected.
+      (should (equal (mapcar #'cdr (gptel-permit--scoped-rules))
+                     '(session)))
+      (should (equal (gptel-permit--apply-rules
+                      (list :name "Bash" :args '(:command "ls")))
+                     '(:confirm t))))))
+
+(ert-deftest gptel-permit-log-names-matched-scope-and-source ()
+  "With logging on, the log names the matched scope and where its rule
+came from — the store file for a project rule."
+  (let ((gptel-permit-log-enabled t)
+        (gptel-permit-rules nil)
+        (gptel-permit-global-rules nil))
+    (gptel-permit-rule-engine-test--clear-log)
+    (with-temp-buffer
+      (should (equal (gptel-permit--scoped-rules)
+                     (gptel-permit--scoped-rules)))
+      (let ((gptel-permit-rule-scopes
+             (gptel-permit-rule-engine-test--registry
+              nil
+              nil
+              '((:tool "Bash"
+                       :conditions ((:command . "^make"))
+                       :action allow
+                       :origin (:scope project :file "/proj/gui/.gptel-permit-rules")))
+              nil)))
+        (should (equal (gptel-permit--apply-rules
+                        (list :name "Bash" :args '(:command "make test")))
+                       '(:confirm nil))))
+      (let ((log (gptel-permit-rule-engine-test--log)))
+        (should (string-match-p "scope=project file=/proj/gui/.gptel-permit-rules" log))
+        (should (string-match-p "action=allow" log))))))
+
+(ert-deftest gptel-permit-log-names-notebook-heading-source ()
+  "A notebook match names its heading in the log."
+  (let ((gptel-permit-log-enabled t)
+        (gptel-permit-rules nil)
+        (gptel-permit-global-rules nil))
+    (gptel-permit-rule-engine-test--clear-log)
+    (with-temp-buffer
+      (let ((gptel-permit-rule-scopes
+             (gptel-permit-rule-engine-test--registry
+              nil
+              '((:tool "Bash"
+                       :conditions ((:command . "^make"))
+                       :action allow
+                       :origin (:scope notebook :file "/n/notes.org" :heading "Work setup")))
+              nil
+              nil)))
+        (gptel-permit--apply-rules (list :name "Bash" :args '(:command "make test"))))
+      (should (string-match-p "scope=notebook.*heading=Work setup"
+                              (gptel-permit-rule-engine-test--log))))))
+
+(ert-deftest gptel-permit-log-no-match-names-no-scope ()
+  "When no rule matches, the log records the absence of a match without
+naming a contributing scope."
+  (let ((gptel-permit-log-enabled t))
+    (gptel-permit-rule-engine-test--clear-log)
+    (with-temp-buffer
+      (let ((gptel-permit-rules nil)
+            (gptel-permit-global-rules nil))
+        (should (null (gptel-permit--apply-rules
+                       (list :name "Read" :args '(:file_path "x.txt"))))))
+      (let ((log (gptel-permit-rule-engine-test--log)))
+        (should (string-match-p "Verdict: none (fallback)" log))
+        (should-not (string-match-p "scope=" log))))))
 
 ;; -------------------------------------------------------------------
 ;; Path normalization in rules

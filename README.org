@@ -50,7 +50,7 @@ When an LLM calls a tool, =gptel-permit= performs:
 1. *Sanity checks* that the tool is known and its required arguments are present. Misconfigured calls are denied with a message, preventing sloppy LLMs (such as DeepSeek) from crashing mid-session.
 2. *Permission rules evaluation* to save you from manually deciding on cases you already decided on.
 
-Session-local rules (=gptel-permit-rules=) are checked first, followed by global rules (=gptel-permit-global-rules=). The first matching rule decides the outcome.
+Rules are collected from four *rule scopes* (see [[*Rule Scopes][Rule Scopes]]) in order of specificity: session (=gptel-permit-rules=), notebook (the notebook file), project (=.gptel-permit-rules= stores) and global (=gptel-permit-global-rules=). The first matching rule decides the outcome.
 
 The actions are:
 - ~allow~: Auto-executes the tool call with no prompt.
@@ -167,6 +167,132 @@ Conditions can use built-in predicate keywords instead of regexps:
 - ~:inside-protected-dirs~: True if the path is within any directory listed in =gptel-permit-protected-dirs=.
 - ~:path-traversal~: True if the unexpanded argument contains ~..~ or starts with ~/~ (absolute path).
 
+** Rule Scopes
+
+Rules live in one of four *scopes*, checked most specific first. The
+first matching rule across all scopes decides the verdict; a scope
+with no storage in the current context simply contributes nothing, so
+with no persisted rules the engine behaves exactly as it did before
+scopes existed.
+
+| Scope    | Order | Stored in                          | Lives for            |
+|----------+-------+------------------------------------+----------------------|
+| ~session~ | 1     | =gptel-permit-rules= (buffer-local) | the current buffer   |
+| ~notebook~ | 2     | the notebook file itself           | the file's existence |
+| ~project~ | 3     | =.gptel-permit-rules= store files  | the project          |
+| ~global~  | 4     | =gptel-permit-global-rules= (Custom) | every session      |
+
+The order above *is* the match order and the only determinant of
+precedence; it is user-visible configuration in =gptel-permit-rule-scopes=
+(an ordered alist of ~(SCOPE :reader ... :writer ...)~ entries).
+Removing a scope's entry from it disables that scope entirely — its
+rules do not apply and its store is not even read — and adding an entry
+adds a scope (a third-party package can register, e.g., a "workspace"
+scope without any engine change). ~global~ is always consulted last:
+every narrower scope with a matching rule outranks it, and a user can
+move any of the default global rules into a narrower scope at any time.
+
+Each matched rule is /traceable to its file/: with
+=gptel-permit-log-enabled= the log names the matching scope and the
+exact source — the store file for a project rule, the heading or the
+file level for an Org notebook rule — and the analytics =rule-match=/=verdict=
+events carry the matched scope.
+
+*** Notebook scope: the rules live in the notebook file
+
+An Org notebook stores the rules in the =GPTEL_PERMIT_RULES= property,
+holding the rules as their printed Lisp form:
+
+#+begin_example
+#+TITLE: My notebook
+:PROPERTIES:
+:GPTEL_PERMIT_RULES: ((:tool "Bash" :conditions ((:command . "^make test")) :action allow))
+:END:
+* The topic
+...
+* Setup
+:PROPERTIES:
+:GPTEL_PERMIT_RULES: ((:tool "Bash" :conditions ((:command . "^make")) :action deny))
+:END:
+#+end_example
+
+The /file-level/ property governs calls from anywhere in the notebook.
+A /heading's/ own property governs calls made with point inside its
+subtree and overrides every broader value (the wizard always writes at
+file level, so a rule created inside a subtree is still notebook-wide).
+Where neither the entry under point nor the file-level drawer applies,
+the nearest ancestor heading's value governs — nearest value wins —
+which is why a heading override can quietly shadow a file-level rule
+for its subtree; keep the precedence table in mind when editing.
+
+The property's position does not matter: a drawer that follows a
+keyword line such as =#+TITLE:= is found too.
+
+A markdown (or plain text) notebook instead carries a standard local
+variable, in the same =Local Variables:= block gptel itself uses:
+
+#+begin_example
+... notebook text ...
+
+;; Local Variables:
+;; gptel-permit-notebook-rules: ((:tool "Bash" :conditions ((:command . "^make test")) :action allow))
+;; End:
+#+end_example
+
+The markdown notebook's scope variable is
+=gptel-permit-notebook-rules=, written for you by the wizard with
+=add-file-local-variable= (the same file-local mechanism gptel's
+=gptel--bounds= uses). It has a ~safe-local-variable~ property, so
+visiting a rules-bearing notebook does not prompt about local
+variables; it depends on ~enable-local-variables~ being non-nil (the
+default) — with that option nil the markdown notebook scope
+contributes nothing.
+
+*** Project scope: =.gptel-permit-rules= stores
+
+A project's rules live in =.gptel-permit-rules= files: one printed rule
+plist per line, with =;=-comments and blank lines allowed, hand-editable
+at any time:
+
+#+begin_example
+;; let the agent run tests
+(:tool "Bash" :conditions ((:command . "^make test")) :action allow)
+
+;; read tools stay allowed inside the project
+(:tool-group read :conditions ((path . :inside-project)) :action allow)
+#+end_example
+
+Every directory on the chain from the notebook's directory up to and
+including the project root may hold such a store, and /all of them are
+consulted together, nearest first/: the rule of the store closest to
+the notebook decides; stores further up fill wherever the closer ones
+are silent (like =.gitignore=, unlike =.dir-locals.el= — a subfolder
+store does not discard the root's rules). The walk stops at the project
+root: nothing above it is read, so a store in your home directory never
+governs a project below it; policy spanning several projects belongs to
+the global scope.
+
+A store edited (or created) between two tool calls governs the next
+call — no restart and no buffer revisit. Storing a rule appends it to
+the project root's store only, never outside the project directory.
+
+*Trust caveat:* reading these files needs no confirmation, exactly as
+Emacs trusts a repository's =.dir-locals.el=. A cloned repository can
+ship a =.gptel-permit-rules= (in /any/ directory inside the project, not
+just the root) that auto-approves its own tool calls. Rules read from a
+store are validated as /data/, not code — lambda or other code-shaped
+conditions are rejected and logged — but an allow line inside the store
+is still an allow. If your projects do not get to ship policy, set:
+
+#+begin_src elisp
+(setq gptel-permit-project-rules-enabled nil)
+#+end_src
+
+With the option off the project scope contributes nothing and the wizard
+refuses to store project rules (naming
+=gptel-permit-project-rules-enabled=); the rule stays in effect for the
+session only.
+
 ** Built-in Global Rules
 :PROPERTIES:
 :ID:       3b0f5096-9e6a-44fa-95c1-2a72f314d11f
@@ -222,14 +348,16 @@ When gptel prompts you to approve a tool call, you can press =C-c C-b= (=gptel-p
 1. *Group Detection*: If the tool or arguments belong to defined groups (e.g., the ~Read~ tool in the ~read~ group, or ~:file_path~ in the ~path~ group), you will be asked if you want to target the entire group.
 2. *Condition & Action*: Prompt for the match condition (by choosing arguments or completing) and then select the action (~allow~, ~deny~, or ~ask~).
 
-The rule is instantly added to your active session (=gptel-permit-rules=) and applied.
+As the last question the wizard asks for the target *scope* (=session= by default, so accepting the default keeps that behavior: the rule goes into =gptel-permit-rules=, governs only this session, and dies with the buffer). Answering =notebook=, =project= or =global= persists the rule into that scope's store instead — it is not duplicated into the session, and pending calls are still resolved immediately. A storage failure keeps the rule in effect for the session.
 
 ** Customization Options
 
 - =gptel-permit-global-rules=: Persisted global rules.
 - =gptel-permit-tool-groups=: Map tool names to tool-groups and argument-groups.
 - =gptel-permit-protected-dirs=: Directories matching the ~:inside-protected-dirs~ predicate and read-only bound by the sandbox (default: ~("~/.ssh/" "~/.gnupg/" "./.git")~). An entry starting with =./= is resolved against the project root, so =./.git= protects the current project's git metadata (hooks and config).
-- =gptel-permit-log-enabled=: Set to ~t~ to print verbose matching diagnostics to the =*gptel-permit-log*= buffer.
+- =gptel-permit-log-enabled=: Set to ~t~ to print verbose matching diagnostics to the =*gptel-permit-log*= buffer; when a rule matched, the log names the scope and the exact source of that rule (store file, Org heading, or the notebook's file level).
+- =gptel-permit-rule-scopes=: The ordered scope registry (see [[*Rule Scopes][Rule Scopes]]); its order is the match order and removing an entry disables that scope.
+- =gptel-permit-project-rules-enabled=: Whether =.gptel-permit-rules= stores are read (default ~t~; set to ~nil~ if repository-shipped policy should not govern you).
 
 * Sandboxing Bash Commands
 :PROPERTIES:
@@ -745,6 +873,14 @@ still fold into the statistics:
   together with the milliseconds spent on the prompt. A cancel is
   recorded as an event, not a terminal outcome (gptel permits
   resuming canceled calls).
+- =rule-match= and =verdict= also carry =scope= (the rule scope that
+  matched — e.g. ="session"=, ="notebook"=, ="project"=, ="global"=) when
+  a rule matched, so an auto-allow can be audited back to the scope
+  that authorized it; calls that matched no rule carry no =scope=. A
+  sample =verdict= line:
+
+: {"id":"20261005T143022.123.4242.42","ts":"2026-10-05T14:30:22.131+0300","type":"verdict","tool":"Bash","action":"allow","scope":"project","confirm":true}
+
 - =audit=: the call was an auto-allow that got audited by sampling (below).
 
 ** Enabling

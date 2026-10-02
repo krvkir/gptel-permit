@@ -482,16 +482,18 @@ what you want, or use an unrecognized backend (nil derivation)."
                   :action allow)
            (:tool "Bash" :action ask))))
     (gptel-permit-judge-test--with-request "SAFE\nlocal only"
-      (should (equal (gptel-permit--find-action
-                      "test-id"
-                      (gptel-permit--enrich-tool-call
-                       (list :name "Bash" :args '(:command "ls ./src"))))
+      (should (equal (plist-get (car (gptel-permit--find-action
+                                      "test-id"
+                                      (gptel-permit--enrich-tool-call
+                                       (list :name "Bash" :args '(:command "ls ./src")))))
+                                :action)
                      'allow)))
     (gptel-permit-judge-test--with-request "UNSAFE\nsystem-wide"
-      (should (equal (gptel-permit--find-action
-                      "test-id"
-                      (gptel-permit--enrich-tool-call
-                       (list :name "Bash" :args '(:command "apt install x"))))
+      (should (equal (plist-get (car (gptel-permit--find-action
+                                      "test-id"
+                                      (gptel-permit--enrich-tool-call
+                                       (list :name "Bash" :args '(:command "apt install x")))))
+                                :action)
                      'ask)))))
 
 (ert-deftest gptel-permit-judge-payload-isolated-from-session-system-prompt ()
