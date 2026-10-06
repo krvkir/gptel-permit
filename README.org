@@ -204,16 +204,16 @@ An Org notebook stores the rules in the =GPTEL_PERMIT_RULES= property,
 holding the rules as their printed Lisp form:
 
 #+begin_example
-#+TITLE: My notebook
-:PROPERTIES:
-:GPTEL_PERMIT_RULES: ((:tool "Bash" :conditions ((:command . "^make test")) :action allow))
-:END:
-* The topic
-...
-* Setup
-:PROPERTIES:
-:GPTEL_PERMIT_RULES: ((:tool "Bash" :conditions ((:command . "^make")) :action deny))
-:END:
+,#+TITLE: My notebook
+,:PROPERTIES:
+,:GPTEL_PERMIT_RULES: ((:tool "Bash" :conditions ((:command . "^make test")) :action allow))
+,:END:
+,* The topic
+,...
+,,* Setup
+,:PROPERTIES:
+,:GPTEL_PERMIT_RULES: ((:tool "Bash" :conditions ((:command . "^make")) :action deny))
+,:END:
 #+end_example
 
 The /file-level/ property governs calls from anywhere in the notebook.
