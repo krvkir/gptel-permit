@@ -3,8 +3,8 @@
 ;; Copyright (C) 2026 krvkir
 
 ;; Author: krvkir <krvkir@gmail.com>
-;; Version: 0.0.1
-;; Package-Requires: ((emacs "29.1") (gptel "0.9.9") (gptel-permit "0.0.1"))
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "29.1") (gptel "0.9.9") (gptel-permit "0.1.0"))
 ;; Keywords: convenience, tools, agents, security
 ;; URL: https://github.com/krvkir/gptel-permit
 
@@ -56,7 +56,8 @@
 (defgroup gptel-permit-sandbox nil
   "Sandbox action for gptel-permit rules."
   :group 'gptel-permit
-  :prefix "gptel-permit-sandbox-")
+  :prefix "gptel-permit-sandbox-"
+  :package-version '("gptel-permit-sandbox" . "0.1.0"))
 
 ;;;; Backend contract (CLOS)
 
@@ -269,10 +270,10 @@ are negligible next to a tool-call round-trip.  Logs the outcome."
                              (gptel-permit-sandbox-available-p instance))))
         (cond
          (available
-          (gptel-permit--log "Sandbox: backend resolved: %s" wanted)
+          (gptel-permit-log "Sandbox: backend resolved: %s" wanted)
           wanted)
          (t
-          (gptel-permit--log
+          (gptel-permit-log
            "Sandbox: backend %s unavailable (class %S, platform %S)"
            wanted class system-type)
           nil))))))
@@ -287,7 +288,7 @@ errors — all the caller's fail-closed paths."
       (condition-case err
           (gptel-permit-sandbox-wrap instance command root)
         (error
-         (gptel-permit--log "Sandbox: wrap via %s errored: %S"
+         (gptel-permit-log "Sandbox: wrap via %s errored: %S"
                             backend err)
          nil))))
 
@@ -326,17 +327,17 @@ backend, or the backend declined — all fail closed in the action."
 
 (defun gptel-permit--sandbox-protected-paths (&optional root)
   "Return existing sensitive paths to read-only bind in the sandbox.
-ROOT is the project root (default `gptel-permit--project-root').
+ROOT is the project root (default `gptel-permit-project-root').
 Every entry of `gptel-permit-protected-dirs' — including its
 project-relative `./' entries, resolved by the shared core helper
-`gptel-permit--expand-protected-dir' — plus the shell rc files.
+`gptel-permit-expand-protected-dir' — plus the shell rc files.
 Nonexistent paths are skipped: bwrap can only bind paths that exist
 (documented limitation).  The bwrap backend additionally binds a path
 whose final component is a symlink at its target, because bubblewrap
 refuses to mount on a symlink destination.  The sandbox adds no
 hardcoded paths of its own beyond the rc-file constant."
   (let* ((candidates (append (mapcar (lambda (dir)
-                                       (gptel-permit--expand-protected-dir
+                                       (gptel-permit-expand-protected-dir
                                         dir root))
                                      gptel-permit-protected-dirs)
                              (mapcar #'expand-file-name
@@ -418,20 +419,20 @@ any other wrapped outcome clears both.  Returns nil."
       (if (gptel-permit-sandbox--boundary-error-p result)
           (progn
             (cl-incf gptel-permit--sandbox-fail-streak)
-            (gptel-permit--log "Sandbox: boundary failure %d/%d"
+            (gptel-permit-log "Sandbox: boundary failure %d/%d"
                                gptel-permit--sandbox-fail-streak
                                gptel-permit-sandbox-retry-limit)
             (when (>= gptel-permit--sandbox-fail-streak
                       gptel-permit-sandbox-retry-limit)
               (setq gptel-permit--sandbox-latched t)
-              (gptel-permit--log
+              (gptel-permit-log
                "Sandbox: latched; sandboxing stays off until reset")
               (message "gptel-permit: %d consecutive sandboxed failures; \
 sandboxing off, reset with M-x gptel-permit-sandbox-reset"
                        gptel-permit-sandbox-retry-limit)))
         (setq gptel-permit--sandbox-fail-streak 0
               gptel-permit--sandbox-latched nil)
-        (gptel-permit--log "Sandbox: command OK; failure state cleared"))))
+        (gptel-permit-log "Sandbox: command OK; failure state cleared"))))
   nil)
 
 (defun gptel-permit-sandbox-reset ()
@@ -442,14 +443,14 @@ boundary-failure cause."
   (interactive)
   (setq gptel-permit--sandbox-latched nil
         gptel-permit--sandbox-fail-streak 0)
-  (gptel-permit--log "Sandbox: latch and failure counter reset")
+  (gptel-permit-log "Sandbox: latch and failure counter reset")
   (message "gptel-permit: sandbox failure state cleared"))
 
 ;;;; The sandbox action
 
 (defun gptel-permit-sandbox--fail-closed (format &rest args)
   "Log the fail-closed reason (built with `format' from FORMAT and ARGS)."
-  (gptel-permit--log "Sandbox: failing closed: %s" (apply #'format format args)))
+  (gptel-permit-log "Sandbox: failing closed: %s" (apply #'format format args)))
 
 (defun gptel-permit--sandbox-action (_id tool-call)
   "Return the sandbox verdict for the enriched TOOL-CALL.
@@ -484,9 +485,9 @@ reset with M-x gptel-permit-sandbox-reset")
               (condition-case err
                   (and (functionp fn)
                        (funcall fn args tool-call
-                                (gptel-permit--project-root)))
+                                (gptel-permit-project-root)))
                 (error
-                 (gptel-permit--log "Sandbox: adapter %S errored: %S"
+                 (gptel-permit-log "Sandbox: adapter %S errored: %S"
                                     name err)
                  nil))))
         (cond
@@ -498,10 +499,10 @@ reset with M-x gptel-permit-sandbox-reset")
           result)
          ((consp result)
           (gptel-permit-sandbox--remember-args result args)
-          (gptel-permit--log "Sandbox: %S -> %s"
-                             (gptel-permit--truncate-arg
+          (gptel-permit-log "Sandbox: %S -> %s"
+                             (gptel-permit-truncate-arg
                               (plist-get args :command))
-                             (gptel-permit--truncate-arg
+                             (gptel-permit-truncate-arg
                               (plist-get result :command)))
           (list :confirm nil :args result))
          (t
@@ -541,7 +542,7 @@ all-or-nothing refusals are built from this."
     (let ((new-args (funcall (plist-get (cdr adapter) :wrap-args)
                              arg-plist
                              (list :name name)
-                             (gptel-permit--project-root))))
+                             (gptel-permit-project-root))))
       (unless (and (consp new-args)
                    (not (equal new-args arg-plist)))
         (user-error "gptel-permit: sandbox for \"%s\" was refused" name))

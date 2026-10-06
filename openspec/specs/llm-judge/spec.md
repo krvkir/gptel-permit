@@ -35,7 +35,7 @@ SHALL make the condition return nil so the enclosing rule does not match.
 - **WHEN** the judge request errors, times out, is interrupted with
   C-g, or returns text with no standalone SAFE or UNSAFE line
 - **THEN** the function returns nil and the failure is logged via
-  `gptel-permit--log`.
+  `gptel-permit-log`.
 
 ### Requirement: Judge verdict contract and rationale
 The judge prompt SHALL instruct the model to answer with SAFE or
@@ -138,7 +138,7 @@ occurred), and `gptel-permit--last-judge-rationale` SHALL hold the
 full raw judge response — kept untruncated to aid debugging — for the
 failure class `parse-fail` (nil for `request-fail` and `timeout`).
 Failure paths SHALL log explicit, distinguishable lines via
-`gptel-permit--log`: request errors (`Judge request failed: …`),
+`gptel-permit-log`: request errors (`Judge request failed: …`),
 timeouts (`Judge timeout after Ns`), C-g interruption (`Judge
 interrupted`), and unparseable responses (`Judge response
 unparseable: <full raw response>`). Fail-closed semantics are
@@ -259,23 +259,31 @@ rule engine SHALL NOT declare, reference, or reset judge state itself.
   `judge-rationale`.
 
 ### Requirement: Judge action form
-The rule engine SHALL support judge actions in the `:action` slot:
-the symbol `judge`, or a list whose first element is `judge` followed by
-one or two action symbols. `judge` SHALL be equivalent to
-`(judge allow ask)` and `(judge A)` to `(judge A ask)`; the second action
-of `(judge ON-SAFE ON-UNSAFE)` supplies the UNSAFE resolution. ON-SAFE and
-ON-UNSAFE SHALL each be one of `allow`, `deny`, `ask`, `sandbox`. A rule
-with a judge action SHALL match on its conditions exactly like any other
-rule — the judge takes no part in matching, and a matched judge rule SHALL
-own the call: no later rule is evaluated on its account. The judge
-verdict SHALL determine the matched rule's resolution: SAFE SHALL apply
-ON-SAFE and UNSAFE SHALL apply ON-UNSAFE; a judge evaluation failure
-(timeout, unparseable or failed response) SHALL resolve to a manual
-confirmation. A `deny` resolution SHALL carry a block reason that includes
-the judge's rationale. A malformed judge form (wrong arity or unknown
-action symbol) SHALL be reported with a logged warning and the rule SHALL
-behave as `ask`. The judge action SHALL judge the call's full argument
-set — every argument of the normalized `:args` alist, formatted as in the
+The rule engine SHALL support judge actions in the `:action` slot: the
+symbol `judge`, or a list whose first element is `judge` followed by
+one or two action symbols. `judge` SHALL be equivalent to `(judge
+allow ask)` and `(judge A)` to `(judge A ask)`; the second action of
+`(judge ON-SAFE ON-UNSAFE)` supplies the UNSAFE resolution. ON-SAFE
+and ON-UNSAFE SHALL each be one of `allow`, `deny`, `ask`, or every
+action symbol *registered at runtime*, such as `sandbox` from the
+sandbox module. 
+
+A rule with a judge action SHALL match on its conditions exactly like
+any other rule — the judge takes no part in matching, and a matched
+judge rule SHALL own the call: no later rule is evaluated on its
+account. 
+
+The judge verdict SHALL determine the matched rule's resolution: SAFE
+SHALL apply ON-SAFE and UNSAFE SHALL apply ON-UNSAFE; a judge
+evaluation failure (timeout, unparseable or failed response) SHALL
+resolve to a manual confirmation. A `deny` resolution SHALL carry a
+block reason that includes the judge's rationale. 
+
+A malformed judge form (wrong arity or unknown action symbol) SHALL be
+reported with a logged warning and the rule SHALL behave as `ask`. 
+
+The judge action SHALL judge the call's full argument set — every
+argument of the normalized `:args` alist, formatted as in the
 condition form's prompt construction — rather than any single
 condition-selected value.
 
@@ -316,7 +324,14 @@ condition-selected value.
 #### Scenario: Malformed form fails closed
 - GIVEN a rule with `:action (judge allow deny extra)`
 - WHEN the rule is evaluated
-- THEN a warning is logged and the rule behaves as `ask`.
+
+#### Scenario: Sandbox slot without the sandbox package
+- GIVEN the judge and core packages are installed, the sandbox package
+  is not, and the registry carries no `sandbox` entry
+- WHEN a judge action with `(judge sandbox deny)` resolves to a SAFE
+  verdict
+- THEN the resolution SHALL be `(:confirm t)` with a log line naming the
+  unregistered action, and the original command SHALL NOT be executed.
 
 ### Requirement: Async judge resolution
 The system SHALL support an asynchronous judge mode (selected by
@@ -438,3 +453,4 @@ on its tool overlay, which gptel applies on accept, steer and reject.
 - WHEN the user accepts manually (gptel runs the preview teardown handles)
 - THEN the indicator overlay is removed, with no code of the judge module
   involved.
+  

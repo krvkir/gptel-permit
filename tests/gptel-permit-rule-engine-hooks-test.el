@@ -65,13 +65,13 @@
                 (lambda (_id _tc type payload)
                   (push (cons type payload) seen)))))
     ;; No error escapes; the return value is nil.
-    (should (null (gptel-permit--emit-event "id" nil :rule-match 'allow)))
+    (should (null (gptel-permit-emit-event "id" nil :rule-match 'allow)))
     (should (equal seen '((:rule-match . allow))))))
 
 (ert-deftest gptel-permit-emit-event-no-observers ()
   "Emitting an event with no observers is a harmless no-op."
   (let ((gptel-permit-events-functions nil))
-    (should (null (gptel-permit--emit-event "id" nil :tool-call nil)))))
+    (should (null (gptel-permit-emit-event "id" nil :tool-call nil)))))
 
 ;; -------------------------------------------------------------------
 ;; Registry dispatch behavior
@@ -415,7 +415,7 @@ verbatim; observers treat an unknown TYPE as data."
          (gptel-permit-events-functions
           (list (lambda (_id _tc type payload)
                   (push (cons type payload) seen)))))
-    (gptel-permit--emit-event "id" nil :future-event 'whatever)
+    (gptel-permit-emit-event "id" nil :future-event 'whatever)
     (should (equal (car seen) '(:future-event . whatever)))))
 
 ;; -------------------------------------------------------------------

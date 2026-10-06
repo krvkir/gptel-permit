@@ -10,7 +10,34 @@ This project provides rule-based auto-approval of tool calls for gptel's agentic
 - =gptel-permit-analytics.el= :: The optional `analytics` module: an append-only local JSONL decision log, audit sampling that up-ranks automation-allow verdicts to manual confirms, decision-capture advice on gptel's three interactive tool-call commands, and pure statistics/report functions. Inert until `gptel-permit-register-analytics-hooks` is called. Captures engine events through `gptel-permit-events-functions` and samples through `gptel-permit-veto-functions`; the core calls no analytics function by name. Tool-call ids arrive from the core as `TIMESTAMP.PID.SERIAL` strings.
 - =tests/= :: ERT test suites covering argument normalization, rule matching, engine hooks, validation, the security hook, the modules (including the sandbox backend registry, adapter dispatch, and latch semantics), and analytics (including the cross-module judge-state-leak acceptance test).
 - =README.org= :: User-facing documentation (installation, configuration, usage, extension points).
-- =Makefile= :: Batch test runner.
+- =Makefile= :: Batch test runner plus the staged multi-package build check (=make package-build=).
+
+* Packaging: one repository, four packages
+
+The code is shipped as four packages from this single repository, each
+selecting its files via its MELPA recipe's =:files= directive (the
+=gptel-permit-judge=.el / =gptel-permit-sandbox.el= / =gptel-permit-analytics.el=
+pattern from =embark=/=embark-consult=):
+
+| Package                 | Files (:files)                                                                    |
+|-------------------------+------------------------------------------------------------------------------------|
+| =gptel-permit=          | =gptel-permit.el=                                                                  |
+| =gptel-permit-judge=    | =gptel-permit-judge.el=                                                            |
+| =gptel-permit-sandbox=  | =gptel-permit-sandbox.el=, =gptel-permit-sandbox-bwrap.el=, =gptel-permit-sandbox-srt.el= |
+| =gptel-permit-analytics= | =gptel-permit-analytics.el=                                                        |
+
+Hard =require= edges go only to the core; soft cross-module references
+(analytics→judge buffer-locals via feature guards, analytics→sandbox
+`--rewritten-args` dynamic read, judge→sandbox through the action registry)
+stay soft and are NOT listed in any Package-Requires. All four packages
+version in lockstep (=Version: 0.1.0=; modules pin =(gptel-permit "0.1.0")=).
+
+The build-enforcement invariant lives in =make package-build=: it stages
+each package's files as package.el would and byte-compiles every module
+against ONLY the staged core — so an accidental sibling require fails the
+build, not a user's fresh install. Adding to the core's module-facing
+surface requires editing the "Module interface" section in =gptel-permit.el=
+and the =rule-engine-api= spec.
 
 * Development Approach
 

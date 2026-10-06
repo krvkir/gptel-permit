@@ -3,8 +3,8 @@
 ;; Copyright (C) 2026 krvkir
 
 ;; Author: krvkir <krvkir@gmail.com>
-;; Version: 0.0.1
-;; Package-Requires: ((emacs "29.1") (gptel "0.9.9") (gptel-permit "0.0.1"))
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "29.1") (gptel "0.9.9") (gptel-permit "0.1.0"))
 ;; Keywords: convenience, tools, agents, security
 ;; URL: https://github.com/krvkir/gptel-permit
 

@@ -210,7 +210,7 @@ matching a sandbox rule with no registered adapter SHALL fail closed with
 The wrapper SHALL read-only bind (when the path exists at wrap time) every
 entry of `gptel-permit-protected-dirs` — including its `./.git` default —
 resolved with the shared project-root-relative rules of
-`gptel-permit--expand-protected-dir`, plus the shell rc files
+`gptel-permit-expand-protected-dir`, plus the shell rc files
 (`~/.bashrc`, `~/.bash_profile`, `~/.profile`, `~/.zshrc`). The sandbox SHALL
 NOT add its own hardcoded entries: `gptel-permit-protected-dirs` is the
 single source of truth. Nonexistent paths SHALL be skipped (bwrap

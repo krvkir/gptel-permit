@@ -1,4 +1,8 @@
 ;;; gptel-permit-analytics-test.el --- Tests for analytics -*- lexical-binding: t; -*-
+;;
+;; Cross-module integration suite: requires core + judge + sandbox +
+;; analytics (the full-chain scenarios read judge state and sandbox
+;; rewrites through the documented dynamic-scope contracts).
 
 (require 'ert)
 (require 'json)

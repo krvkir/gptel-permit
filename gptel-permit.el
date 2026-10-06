@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026 krvkir
 
 ;; Author: krvkir <krvkir@gmail.com>
-;; Version: 0.0.1
+;; Version: 0.1.0
 ;; Package-Requires: ((emacs "29.1") (gptel "0.9.9"))
 ;; Keywords: convenience, tools, agents, hypermedia
 ;; URL: https://github.com/krvkir/gptel-permit
@@ -50,9 +50,10 @@
   :type 'boolean
   :group 'gptel-permit)
 
-(defun gptel-permit--log (format-string &rest args)
+(defun gptel-permit-log (format-string &rest args)
   "Log a message to the `*gptel-permit-log*' buffer if logging is enabled.
-FORMAT-STRING and ARGS are passed to `format'."
+FORMAT-STRING and ARGS are passed to `format'.  Public so the
+optional modules log through the same channel."
   (when gptel-permit-log-enabled
     (let ((msg (apply #'format format-string args))
           (buf (get-buffer-create "*gptel-permit-log*")))
@@ -62,8 +63,10 @@ FORMAT-STRING and ARGS are passed to `format'."
           (let ((inhibit-read-only t))
             (insert (format-time-string "[%Y-%m-%d %H:%M:%S] ") msg "\n")))))))
 
-(defun gptel-permit--truncate-arg (arg)
-  "Truncate string representation of ARG to first 30 and last 30 characters if it's longer than 60."
+(defun gptel-permit-truncate-arg (arg)
+  "Truncate string representation of ARG to 30+30 chars for logging.
+Public because the optional modules format argument values into
+their own logs and verdict rationales."
   (let ((s (format "%s" arg)))
     (if (> (length s) 60)
         (concat (substring s 0 30) "..." (substring s -30))
@@ -213,6 +216,40 @@ A user who sets it to nil gets no markdown notebook scope at all:
 the variable is never set on visit, `gptel-permit--read-notebook-rules'
 returns no rules and the notebook scope contributes nothing.")
 
+;;;; Module interface
+;;
+;; The three optional modules (`gptel-permit-judge',
+;; `gptel-permit-sandbox', `gptel-permit-analytics') are separate
+;; packages that depend only on this core.  The core references none of
+;; their symbols; this section documents the symbols they (and
+;; third-party event sources) are allowed to rely on.  Each module's
+;; Package-Requires pins the core version that provides this contract.
+;;
+;; Registry and hooks (always safe to reference after `require'):
+;;   `gptel-permit-action-handlers'         action registry alist
+;;   `gptel-permit-before-rule-match-functions'  per-call state hook
+;;   `gptel-permit-veto-functions'          verdict upgrade hook
+;;   `gptel-permit-events-functions'        observer tap
+;;
+;; Helpers (module-callable, see their docstrings):
+;;   `gptel-permit-log'                     `*gptel-permit-log*' sink
+;;   `gptel-permit-truncate-arg'            log/rationale formatting
+;;   `gptel-permit-emit-event'              event emission entry point
+;;   `gptel-permit-project-root'            project root fallback
+;;   `gptel-permit-expand-protected-dir'    protected-dirs expansion
+;;
+;; Dynamic-scope contracts (documented in the defining module):
+;;   `gptel-permit--programmatic-call'       bound by the core during
+;;     verdict and confirm handling; non-nil tells analytics the call
+;;     is engine-driven, not user-driven.
+;;   `gptel-permit--last-judge-verdict',
+;;   `gptel-permit--last-judge-rationale',
+;;   `gptel-permit-judge-model'              let-bound by the judge
+;;     during rule matching and read by analytics while recording; when
+;;     the judge is not in play the reader must treat them as unbound.
+;;   `gptel-permit-sandbox--rewritten-args'  let-bound by the sandbox's
+;;     accept command; analytics must treat nil as "no rewrite
+;;     happened"
 ;;;###autoload
 (put 'gptel-permit-notebook-rules 'safe-local-variable #'listp)
 
@@ -351,7 +388,7 @@ ORIGIN as its `:origin', overwriting any store-supplied origin."
            if (gptel-permit--valid-persisted-rule-p rule)
            collect (gptel-permit--rule-with-origin rule origin)
            else
-           do (gptel-permit--log "Skipped invalid %s rule: %S" scope rule)))
+           do (gptel-permit-log "Skipped invalid %s rule: %S" scope rule)))
 
 (defcustom gptel-permit-protected-dirs '("~/.ssh/" "~/.gnupg/")
   "Directories that always require confirmation for tool-call access.
@@ -359,7 +396,7 @@ Used by the `:inside-protected-dirs' predicate in permission rules and
 by the sandbox's mandatory read-only binds.
 
 An entry starting with \"./\" is resolved relative to the project root
-(`gptel-permit--project-root', falling back to `default-directory'), so
+(`gptel-permit-project-root', falling back to `default-directory'), so
 the default `./.git' protects the current project's repository with the
 same single option that guards home-directory paths.  All other entries
 are resolved with `expand-file-name' (`~' etc.)."
@@ -428,20 +465,24 @@ belonging to that group."
         (gptel-get-tool name)
       (alist-get name gptel-tools nil nil #'equal))))
 
-(defun gptel-permit--project-root ()
-  "Get the current project root or active buffer's directory."
+(defun gptel-permit-project-root ()
+  "Get the current project root or active buffer's directory.
+Public: the sandbox module uses it as the fallback working
+directory for sandboxed accept commands."
   (let ((pr (project-current))
         (bfn (buffer-file-name)))
     (or (and pr (project-root pr))
         (and bfn (file-name-directory bfn)))))
 
-(defun gptel-permit--expand-protected-dir (dir &optional root)
+(defun gptel-permit-expand-protected-dir (dir &optional root)
   "Expand a protected-dirs entry DIR, or nil when DIR is not a string.
 An entry starting with \"./\" resolves against the project root ROOT,
-else `gptel-permit--project-root', else `default-directory'; every
-other entry goes through `expand-file-name' (`~', absolute paths)."
+else `gptel-permit-project-root', else `default-directory'; every
+other entry goes through `expand-file-name' (`~', absolute paths).
+Public: read-only binds for the sandbox backends are built from the
+same `gptel-permit-protected-dirs' option and expansion rules."
   (when (stringp dir)
-    (let ((root (or root (gptel-permit--project-root))))
+    (let ((root (or root (gptel-permit-project-root))))
       (if (string-prefix-p "./" dir)
           (cond (root (directory-file-name
                        (expand-file-name (substring dir 2) root)))
@@ -500,12 +541,12 @@ names, missing required arguments, and unknown argument names."
     (let* ((name (plist-get tool-call :name))
            (args (plist-get tool-call :args))
            (trunc-args (cl-loop for (k v) on args by #'cddr
-                                collect k collect (gptel-permit--truncate-arg v))))
-      (gptel-permit--log "Started validation for tool: %s with args: %S" name trunc-args)
+                                collect k collect (gptel-permit-truncate-arg v))))
+      (gptel-permit-log "Started validation for tool: %s with args: %S" name trunc-args)
       (let ((tool (gptel-permit--get-tool name)))
         (if (not tool)
             (progn
-              (gptel-permit--log "Verdict: Blocked (Unknown tool: %s)" name)
+              (gptel-permit-log "Verdict: Blocked (Unknown tool: %s)" name)
               (list :block (format "Unknown tool: %s" name)))
           (let* ((spec-args (gptel-tool-args tool))
                  (spec-arg-names (mapcar (lambda (a) (intern (concat ":" (plist-get a :name)))) spec-args))
@@ -513,9 +554,9 @@ names, missing required arguments, and unknown argument names."
                  (unknown nil))
             (cl-loop for (k _v) on args by #'cddr do
                      (if (memq k spec-arg-names)
-                         (gptel-permit--log "Argument %s provided: ok" k)
+                         (gptel-permit-log "Argument %s provided: ok" k)
                        (progn
-                         (gptel-permit--log "Argument %s provided: wrong (unknown argument)" k)
+                         (gptel-permit-log "Argument %s provided: wrong (unknown argument)" k)
                          (push (symbol-name k) unknown))))
             (dolist (spec-arg spec-args)
               (let* ((arg-name (intern (concat ":" (plist-get spec-arg :name))))
@@ -524,7 +565,7 @@ names, missing required arguments, and unknown argument names."
                 (when (and (not optional)
                            (or (not (plist-member args arg-name))
                                (null val)))
-                  (gptel-permit--log "Argument %s missing (required)" arg-name)
+                  (gptel-permit-log "Argument %s missing (required)" arg-name)
                   (push (plist-get spec-arg :name) missing))))
             (let ((msg-parts nil))
               (when missing
@@ -536,29 +577,29 @@ names, missing required arguments, and unknown argument names."
                       msg-parts))
               (if msg-parts
                   (let ((msg (mapconcat #'identity (nreverse msg-parts) "; ")))
-                    (gptel-permit--log "Verdict: Blocked (%s)" msg)
+                    (gptel-permit-log "Verdict: Blocked (%s)" msg)
                     (list :block msg))
                 (progn
-                  (gptel-permit--log "Verdict: Validation passed")
+                  (gptel-permit-log "Verdict: Validation passed")
                   nil)))))))))
 
 (defun gptel-permit--inside-project-p (expanded _raw _tool-call)
   "Return non-nil if expanded path EXPANDED is inside the project root."
-  (let ((root (gptel-permit--project-root)))
+  (let ((root (gptel-permit-project-root)))
     (and root (file-in-directory-p (format "%s" expanded) root))))
 
 (defun gptel-permit--outside-project-p (expanded _raw _tool-call)
   "Return non-nil if expanded path EXPANDED is outside the project root."
-  (let ((root (gptel-permit--project-root)))
+  (let ((root (gptel-permit-project-root)))
     (and root (not (file-in-directory-p (format "%s" expanded) root)))))
 
 (defun gptel-permit--inside-protected-dirs-p (expanded _raw _tool-call)
   "Return non-nil if expanded path EXPANDED is inside a protected directory.
 Protected-dirs entries are expanded with
-`gptel-permit--expand-protected-dir' (the `./' prefix is
+`gptel-permit-expand-protected-dir' (the `./' prefix is
 project-root-relative), shared verbatim with the sandbox."
   (cl-some (lambda (d)
-             (let ((pd (gptel-permit--expand-protected-dir d))
+             (let ((pd (gptel-permit-expand-protected-dir d))
                    (tg (format "%s" expanded)))
                (or (file-in-directory-p tg pd)
                    (file-in-directory-p pd tg))))
@@ -598,9 +639,9 @@ fails the condition."
             ((keywordp val)
              (let ((fn (cdr (assoc val gptel-permit--condition-predicates))))
                (if fn (funcall fn (format "%s" expanded) (format "%s" effective) tool-call)
-                 (progn (gptel-permit--log "Unknown condition predicate: %s" val) nil))))
+                 (progn (gptel-permit-log "Unknown condition predicate: %s" val) nil))))
             ((functionp val) (funcall val (format "%s" expanded) tool-call))
-            (t (gptel-permit--log "Unknown condition type: %S" val) nil))))))
+            (t (gptel-permit-log "Unknown condition type: %S" val) nil))))))
 
 (defun gptel-permit--match-rule-p (rule tool-call)
   "Match RULE against enriched TOOL-CALL.
@@ -614,12 +655,12 @@ Returns the rule's :action if matched, otherwise nil."
         (conditions (plist-get rule :conditions))
         (action (plist-get rule :action)))
     (when (and rule-tool rule-tool-group)
-      (gptel-permit--log "Warning: Both :tool and :tool-group present in rule."))
+      (gptel-permit-log "Warning: Both :tool and :tool-group present in rule."))
     (let ((reason (cond ((and rule-tool (equal rule-tool name)) "tool name match")
                         ((and (not rule-tool) rule-tool-group (equal rule-tool-group tool-group)) "tool group match")
                         ((and (not rule-tool) (not rule-tool-group)) "universal rule"))))
       (when reason
-        (gptel-permit--log "Testing rule (reason: %s): %S" reason rule)
+        (gptel-permit-log "Testing rule (reason: %s): %S" reason rule)
         (let ((match (cl-every
                       (lambda (cond-pair)
                         (let* ((key (car cond-pair))
@@ -634,7 +675,7 @@ Returns the rule's :action if matched, otherwise nil."
                                 arg-keys))))
                       conditions)))
           (when match
-            (gptel-permit--log "Rule matched!")
+            (gptel-permit-log "Rule matched!")
             action))))))
 
 (defun gptel-permit--action-allow (_id _tool-call)
@@ -707,7 +748,7 @@ symbol (nil when no rule matched), (ACTION . VERDICT) or nil
 respectively.  The event type set is open: future engine versions may
 emit additional event types through this hook with the same signature.
 Each function runs isolated in `condition-case' (see
-`gptel-permit--emit-event'): an erroring observer is logged and can
+`gptel-permit-emit-event'): an erroring observer is logged and can
 never alter a verdict.")
 
 (defvar gptel-permit-veto-functions nil
@@ -719,8 +760,10 @@ function — performs the upgrade.  Veto functions inspect VERDICT and can
 only veto: they never return modified verdicts.  Errors are not caught:
 they fail the call closed.")
 
-(defun gptel-permit--emit-event (id tool-call type payload)
+(defun gptel-permit-emit-event (id tool-call type payload)
   "Emit an engine event (ID TOOL-CALL TYPE PAYLOAD).
+Public: modules and third-party event sources use it to feed their
+own events into the same tap (see the judge's `:judge-verdict').
 Delivery to the observers on `gptel-permit-events-functions' is an
 implementation detail of no concern to the caller: each observer runs
 isolated in `condition-case', an erroring observer is logged and
@@ -729,7 +772,7 @@ never alter a verdict."
   (dolist (fn gptel-permit-events-functions)
     (condition-case err
         (funcall fn id tool-call type payload)
-      (error (gptel-permit--log "Event observer %S failed: %S" fn err)))))
+      (error (gptel-permit-log "Event observer %S failed: %S" fn err)))))
 
 
 ;;; Rule scope storage
@@ -772,7 +815,7 @@ touches any project or notebook file."
   "The project root's `.gptel-permit-rules' store path, or nil.
 The project scope's `:writer' appends here only — never to a store in
 a deeper hand-chosen directory."
-  (when-let* ((root (gptel-permit--project-root)))
+  (when-let* ((root (gptel-permit-project-root)))
     (expand-file-name gptel-permit-store-file-name root)))
 
 (defun gptel-permit--dir-parent (dir)
@@ -793,14 +836,14 @@ nil when DIR is neither TOP nor below it."
 (defun gptel-permit--project-rules-chain ()
   "The store directories of the project scope, nearest first.
 Every directory from the notebook's directory up to and including
-`gptel-permit--project-root' may hold a `.gptel-permit-rules' store.
+`gptel-permit-project-root' may hold a `.gptel-permit-rules' store.
 nil when no project root resolves — no project and no visited file —
 in which case the project scope contributes nothing.  The walk stops
 at the project root: nothing above it is read, so a store in a
 directory above the root (e.g. the user's home directory) cannot
 govern the project; policy spanning several projects is the global
 scope's business."
-  (when-let* ((top (gptel-permit--project-root)))
+  (when-let* ((top (gptel-permit-project-root)))
     (let ((start (file-name-as-directory
                   (expand-file-name
                    (or (and (buffer-file-name)
@@ -1172,7 +1215,7 @@ ID is the tool-call id.  Rules come from `gptel-permit--scoped-rules'
 — the scopes of `gptel-permit-rule-scopes', most specific first — and
 first match wins; no further rules are evaluated after a match.
 
-A :rule-match event is emitted through `gptel-permit--emit-event' at
+A :rule-match event is emitted through `gptel-permit-emit-event' at
 the moment the match is decided: on the first matching rule (after the
 enriched TOOL-CALL has been annotated with the matching scope,
 :rule-scope, and the rule's reader-attested origin, :rule-origin), or
@@ -1187,13 +1230,13 @@ them on the same plist object they passed in."
                 (plist-put tool-call :rule-scope (cdr scoped))
                 tool-call
                 (plist-put tool-call :rule-origin (plist-get rule :origin)))
-          (gptel-permit--log "Matched rule: action=%s %s"
+          (gptel-permit-log "Matched rule: action=%s %s"
                              action
                              (gptel-permit--format-origin
                               (plist-get rule :origin)))
-          (gptel-permit--emit-event id tool-call :rule-match action)
+          (gptel-permit-emit-event id tool-call :rule-match action)
           (throw 'found scoped))))
-    (gptel-permit--emit-event id tool-call :rule-match nil)
+    (gptel-permit-emit-event id tool-call :rule-match nil)
     nil))
 
 (defun gptel-permit--apply-rules (tool-call)
@@ -1208,7 +1251,7 @@ its store — fail closed with (:confirm t).
 
 Events: the call's tool-call id is minted
 (`gptel-permit--mint-tool-call-id') and the call's events are emitted
-through `gptel-permit--emit-event' —
+through `gptel-permit-emit-event' —
 :tool-call, then :rule-match (from `gptel-permit--find-action'), then
 :verdict, then :confirm when the final verdict asks.  When a rule
 matched, the enriched call carries the matching scope `:rule-scope'
@@ -1224,9 +1267,9 @@ the verdict to (:confirm t), preserving any :args rewrite."
                (name (plist-get enriched :name))
                (args (plist-get enriched :args))
                (trunc-args (cl-loop for (k v) on args by #'cddr
-                                    collect k collect (gptel-permit--truncate-arg v))))
-          (gptel-permit--log "Started rule checks for tool: %s with args: %S" name trunc-args)
-          (gptel-permit--emit-event id enriched :tool-call nil)
+                                    collect k collect (gptel-permit-truncate-arg v))))
+          (gptel-permit-log "Started rule checks for tool: %s with args: %S" name trunc-args)
+          (gptel-permit-emit-event id enriched :tool-call nil)
           (run-hook-with-args
            'gptel-permit-before-rule-match-functions id enriched)
           (let* ((matched (gptel-permit--find-action id enriched))
@@ -1238,14 +1281,14 @@ the verdict to (:confirm t), preserving any :args rewrite."
                  (verdict
                   (cond ((null action) nil)
                         ((null handler)
-                         (gptel-permit--log
+                         (gptel-permit-log
                           "No handler for action %S — failing closed" action)
                          (list :confirm t))
                         ((consp action)
                          (funcall handler id enriched (cdr action)))
                         (t (funcall handler id enriched)))))
-            (gptel-permit--log "Verdict: %s" (or action "none (fallback)"))
-            (gptel-permit--emit-event id enriched :verdict (cons action verdict))
+            (gptel-permit-log "Verdict: %s" (or action "none (fallback)"))
+            (gptel-permit-emit-event id enriched :verdict (cons action verdict))
             (when (and action
                        (run-hook-with-args-until-success
                         'gptel-permit-veto-functions id enriched verdict))
@@ -1254,13 +1297,12 @@ the verdict to (:confirm t), preserving any :args rewrite."
                         (list :confirm t :args (plist-get verdict :args))
                       (list :confirm t))))
             (when (and (consp verdict) (plist-get verdict :confirm))
-              (gptel-permit--emit-event id enriched :confirm nil))
+              (gptel-permit-emit-event id enriched :confirm nil))
             verdict)))
     (error
-     (gptel-permit--log "Error in --apply-rules: %S — failing closed" err)
+     (gptel-permit-log "Error in --apply-rules: %S — failing closed" err)
      (list :confirm t))))
 
-;;;###autoload
 (defun gptel-permit--scope-writer (scope)
   "Return the `:writer' of SCOPE in `gptel-permit-rule-scopes', or nil."
   (plist-get (cdr (assq scope gptel-permit-rule-scopes)) :writer))
@@ -1301,13 +1343,13 @@ not lost."
      (condition-case err
          (funcall (gptel-permit--scope-writer scope) rule)
        (error
-        (gptel-permit--log
+        (gptel-permit-log
          "Storing rule into %S failed: %S — keeping a session copy"
          scope err)
         (message "Could not store the rule in scope %s (%s) — kept for this session"
                  scope (error-message-string err))
         (push rule gptel-permit-rules)))))
-  (gptel-permit--log "Resulting rule: %S (scope %S)" rule scope)
+  (gptel-permit-log "Resulting rule: %S (scope %S)" rule scope)
   (message "Rule added (%s): %S" scope rule)
   (pcase (plist-get rule :action)
     (`deny (when (fboundp 'gptel--reject-tool-calls)
@@ -1348,7 +1390,7 @@ action (`gptel-permit--store-and-resolve'), exactly as before."
     ;; Fallback for interactive use outside the overlay, though normally called via keymap
     (user-error "No tool-calls provided to create a rule for"))
   (let* ((normalized-tool-calls (mapcar #'gptel-permit--normalize-tool-call tool-calls)))
-    (gptel-permit--log "Started rule addition. Active tool calls: %S"
+    (gptel-permit-log "Started rule addition. Active tool calls: %S"
                        (mapcar (lambda (tc) (plist-get tc :name)) normalized-tool-calls))
     (let* ((tool-call (car normalized-tool-calls))
            (enriched (gptel-permit--enrich-tool-call tool-call))
@@ -1358,10 +1400,10 @@ action (`gptel-permit--store-and-resolve'), exactly as before."
            (arg-groups (plist-get enriched :arg-groups))
            (rule (list))
            (conditions nil))
-      (gptel-permit--log "Using tool call: %s (group: %s). Args found: %S. Arg groups: %S"
+      (gptel-permit-log "Using tool call: %s (group: %s). Args found: %S. Arg groups: %S"
                          name tool-group
                          (cl-loop for (k v) on args by #'cddr collect k
-                                  collect (gptel-permit--truncate-arg v)) arg-groups)
+                                  collect (gptel-permit-truncate-arg v)) arg-groups)
       (if (and tool-group
                (y-or-n-p (format "Tool '%s' belongs to group '%s'. Target the entire group?"
                                  name tool-group)))
@@ -1392,7 +1434,7 @@ action (`gptel-permit--store-and-resolve'), exactly as before."
                        (default-re (if effective-val (format "^%s$" (regexp-quote (format "%s" effective-val))) ""))
                        (re (read-string (format "Regexp for %s: " target) default-re)))
                   (push (cons target re) conditions)
-                  (gptel-permit--log "Added condition: %s matches %S" target re)))))))
+                  (gptel-permit-log "Added condition: %s matches %S" target re)))))))
       (setq rule (plist-put rule :conditions (nreverse conditions)))
       (let ((action (intern (completing-read "Action: " '("allow" "ask" "deny") nil t))))
         (setq rule (plist-put rule :action action))

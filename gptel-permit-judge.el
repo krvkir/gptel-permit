@@ -3,8 +3,8 @@
 ;; Copyright (C) 2026 krvkir
 
 ;; Author: krvkir <krvkir@gmail.com>
-;; Version: 0.0.1
-;; Package-Requires: ((emacs "29.1") (gptel "0.9.9") (gptel-permit "0.0.1"))
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "29.1") (gptel "0.9.9") (gptel-permit "0.1.0"))
 ;; Keywords: convenience, tools, agents, security
 ;; URL: https://github.com/krvkir/gptel-permit
 
@@ -28,6 +28,11 @@
 ;; resolves to manual confirmation.  See `gptel-permit--action-judge'
 ;; and `gptel-permit-judge-async'.
 ;;
+;; Resolution symbols name entries of the core's action registry, so
+;; `(judge allow sandbox)' works across packages without a require: if
+;; the gptel-permit-sandbox package is absent or unloaded, the registry
+;; misses and the resolution fails closed to manual confirmation.
+;;
 ;; Rationale: deterministic deny rules must remain ahead of judge rules;
 ;; per-call classifiers are blind to multi-hop exploit chains (cf. Embrace
 ;; The Red's break of Claude Code auto mode), so the judge is a
@@ -45,7 +50,8 @@
 (defgroup gptel-permit-judge nil
   "LLM-as-a-judge condition for gptel-permit."
   :group 'gptel-permit
-  :prefix "gptel-permit-judge-")
+  :prefix "gptel-permit-judge-"
+  :package-version '("gptel-permit-judge" . "0.1.0"))
 
 (defcustom gptel-permit-judge-backend nil
   "Name of the gptel backend used for judging, or nil to disable.
@@ -82,7 +88,7 @@ The effective plist is let-bound as gptel's `gptel--request-params'
 around the judge request; gptel merges it into the request body with
 precedence: gptel's request defaults < these params < the backend's
 `:request-params' < the model's `:request-params'.  The effective
-value is logged via `gptel-permit--log' on every judge request.
+value is logged via `gptel-permit-log' on every judge request.
 
 When nil (the default) and `gptel-permit-judge-control-thinking'
 is non-nil, thinking-off parameters are derived from the
@@ -200,7 +206,7 @@ tool call's :buffer (a buffer name string); each message is truncated."
                                                       gptel-permit-judge-history-entries))
                              (error nil))))
               (if entries
-                  (mapconcat (lambda (e) (gptel-permit--truncate-arg (format "%S" e)))
+                  (mapconcat (lambda (e) (gptel-permit-truncate-arg (format "%S" e)))
                              entries "\n")
                 ""))
           ""))
@@ -231,7 +237,7 @@ condition-selected value, the action judges every argument."
                    (format "TOOL CALL:\nTool: %s\nKey: %s\nValue:\n%s"
                            (plist-get tool-call :name)
                            checked
-                           ;; (gptel-permit--truncate-arg value)
+                           ;; (gptel-permit-truncate-arg value)
                            value)
                  (format "TOOL CALL:\nTool: %s\nArgs:\n%s"
                          (plist-get tool-call :name)
@@ -291,7 +297,7 @@ reaches the judge."
          (gptel-use-tools nil)
          (gptel-use-context nil)
          (gptel-stream nil))
-    (gptel-permit--log "Judge request params: %S" gptel--request-params)
+    (gptel-permit-log "Judge request params: %S" gptel--request-params)
     (gptel-request prompt :system nil :callback callback)))
 
 (defun gptel-permit--judge-request-sync (prompt)
@@ -302,7 +308,7 @@ failure with no response), `timeout' (`gptel-permit-judge-timeout'
 elapsed) or `interrupted' (the user pressed C-g) — and `:response',
 the response string when `:class' is `ok'.  Blocks up to
 `gptel-permit-judge-timeout' seconds.  Every failure class logs its
-own line via `gptel-permit--log': `Judge request failed: …',
+own line via `gptel-permit-log': `Judge request failed: …',
 `Judge timeout after Ns' or `Judge interrupted'.  Errors are caught
 explicitly (including `user-error' from `gptel-get-backend'); the
 explicit (quit) handler plus `with-local-quit' in the body keep C-g
@@ -330,18 +336,18 @@ parameters, isolation bindings and `:system nil' rationale."
             (let ((deadline (time-add nil gptel-permit-judge-timeout)))
               (while (and (not done) (time-less-p nil deadline))
                 (accept-process-output nil 0.05))))
-        (quit (gptel-permit--log "Judge interrupted")
+        (quit (gptel-permit-log "Judge interrupted")
               (throw 'judge-abort (list :class 'interrupted :response nil)))
         (error
-         (gptel-permit--log "Judge request failed: %s"
+         (gptel-permit-log "Judge request failed: %s"
                             (error-message-string err))
          (throw 'judge-abort (list :class 'request-fail :response nil))))
       (cond
        ((and done (stringp resp)) (list :class 'ok :response resp))
-       (done (gptel-permit--log "Judge request failed: %s"
+       (done (gptel-permit-log "Judge request failed: %s"
                                 (or status "no response"))
              (list :class 'request-fail :response nil))
-       (t (gptel-permit--log "Judge timeout after %ss"
+       (t (gptel-permit-log "Judge timeout after %ss"
                              gptel-permit-judge-timeout)
           (list :class 'timeout :response nil))))))
 
@@ -429,10 +435,10 @@ when the response parsed, or a failure class (`parse-fail',
             ('parse-fail (or response ""))
             (_ nil)))
     (if parsed
-        (gptel-permit--log "Judge verdict: %s rationale: %s"
+        (gptel-permit-log "Judge verdict: %s rationale: %s"
                            verdict gptel-permit--last-judge-rationale)
       (when (eq verdict 'parse-fail)
-        (gptel-permit--log "Judge response unparseable: %s"
+        (gptel-permit-log "Judge response unparseable: %s"
                            gptel-permit--last-judge-rationale)))
     verdict))
 
@@ -517,7 +523,7 @@ which the action handler resolves as `ask'."
           (guard (and (memq a gptel-permit--judge-action-symbols)
                       (memq b gptel-permit--judge-action-symbols))))
      (cons a b))
-    (_ (gptel-permit--log "Judge action: malformed form %S — behaving as ask" form)
+    (_ (gptel-permit-log "Judge action: malformed form %S — behaving as ask" form)
        nil)))
 
 (defun gptel-permit--judge-verdict-glyph (resolved)
@@ -588,7 +594,7 @@ unregistered or nil-returning action handler resolves to
            (if handler
                (or (funcall handler id tool-call)
                    (list :confirm t))
-             (gptel-permit--log
+             (gptel-permit-log
               "Judge action: no handler for %S — failing closed" sym)
              (list :confirm t))))))
     (_ (list :confirm t))))
@@ -603,7 +609,7 @@ is invoked with a nil response, which the resolution path records as
       (progn (gptel-permit--judge-request-body prompt callback)
              t)
     (error
-     (gptel-permit--log "Judge request failed: %s" (error-message-string err))
+     (gptel-permit-log "Judge request failed: %s" (error-message-string err))
      (funcall callback nil nil)
      nil)))
 
@@ -712,7 +718,7 @@ resolved."
           (plist-put entry :resolved t)
           (setq gptel-permit--last-judge-verdict 'timeout
                 gptel-permit--last-judge-rationale nil)
-          (gptel-permit--log "Judge timeout after %ss"
+          (gptel-permit-log "Judge timeout after %ss"
                              gptel-permit-judge-timeout)
           (when-let* ((ov (gptel-permit--judge-find-pending-overlay key)))
             (gptel-permit--judge-refresh-indicator ov)))))))
@@ -768,7 +774,7 @@ VERDICT is the verdict symbol (including failure classes); the payload
 carries the rationale, the judged argument string, and LATENCY-MS (nil
 in sync mode).  Emitted from the verdict-owning buffer so the per-call
 judge state is current for observers."
-  (gptel-permit--emit-event
+  (gptel-permit-emit-event
    id tool-call :judge-verdict
    (list :verdict verdict
          :rationale gptel-permit--last-judge-rationale
@@ -804,7 +810,7 @@ acted first)."
       (let ((entry (gptel-permit--judge-entry-by-key key)))
         (cond
          ((or (null entry) (plist-get entry :resolved))
-          (gptel-permit--log "Judge: discarded late verdict for %S" key))
+          (gptel-permit-log "Judge: discarded late verdict for %S" key))
          ;; No prompt left: the user answered first (or answered the
          ;; minibuffer prompt — there never was an overlay).  Their
          ;; decision stands; the stale verdict is discarded.
@@ -812,7 +818,7 @@ acted first)."
           (plist-put entry :resolved t)
           (when-let* ((timer (plist-get entry :timer)))
             (cancel-timer timer))
-          (gptel-permit--log "Judge: user acted first — discarded verdict for %S"
+          (gptel-permit-log "Judge: user acted first — discarded verdict for %S"
                              key))
          (t
           (when-let* ((timer (plist-get entry :timer)))
@@ -822,7 +828,7 @@ acted first)."
                               (list :class 'ok :response response)
                             ;; t (empty success body) and nil (failure):
                             ;; both are a failed judgement.
-                            (gptel-permit--log "Judge request failed: %s"
+                            (gptel-permit-log "Judge request failed: %s"
                                                (or (plist-get info :status)
                                                    "no response"))
                             (list :class 'request-fail :response nil)))))
@@ -939,7 +945,7 @@ and the user is told why no auto-action happened."
                                            (null (plist-get e :resolved)))
                                          entries))
                 (just (gptel-permit--judge-entry-by-key key)))
-           (gptel-permit--log
+           (gptel-permit-log
             "Judge: no programmatic resolution — %d unresolved of %d judge-gated"
             unresolved (length entries))
            (when just
@@ -997,7 +1003,7 @@ with `(:confirm t)'."
     (cond
      ((or (null gptel-permit-judge-backend) (null actions))
       (when (null gptel-permit-judge-backend)
-        (gptel-permit--log "Judge: disabled (gptel-permit-judge-backend is nil)"))
+        (gptel-permit-log "Judge: disabled (gptel-permit-judge-backend is nil)"))
       (list :confirm t))
      (gptel-permit-judge-async
       (let ((key (cons (plist-get tool-call :name)
@@ -1041,7 +1047,7 @@ disabled or has not run."
         gptel-permit--last-judge-verdict nil)
   (if (not gptel-permit-judge-backend)
       (progn
-        (gptel-permit--log "Judge: disabled (gptel-permit-judge-backend is nil)")
+        (gptel-permit-log "Judge: disabled (gptel-permit-judge-backend is nil)")
         nil)
     (message "gptel-permit: judging %s call..." (plist-get tool-call :name))
     (let ((verdict (gptel-permit--judge-evaluate
@@ -1068,6 +1074,13 @@ events."
 (add-to-list 'gptel-permit-action-handlers
              '(judge . gptel-permit--action-judge))
 
+(defun gptel-permit-judge-unload-function ()
+  "Undo the judge module's load-time registrations."
+  (setf (alist-get 'judge gptel-permit-action-handlers nil t #'eq)
+        nil)
+  (remove-hook 'gptel-permit-before-rule-match-functions
+               #'gptel-permit-judge--reset-state)
+  nil)
 
 (provide 'gptel-permit-judge)
 ;;; gptel-permit-judge.el ends here

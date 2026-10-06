@@ -1,4 +1,9 @@
 ;;; gptel-permit-judge-action-test.el --- Tests for judge action -*- lexical-binding: t; -*-
+;;
+;; Cross-module integration suite: requires core + judge + sandbox.
+;; The `(judge sandbox ...)' on-unsafe fallback tests stub sandbox
+;; internals because the two packages are installed separately; users
+;; of judge alone never load this file's fixtures.
 
 (require 'ert)
 (require 'gptel-permit)

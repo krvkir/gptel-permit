@@ -25,6 +25,25 @@ Another day you bring in a tool which, for example, greps git logs in a folder. 
 
 * Installation
 
+The package is distributed as four packages from one repository — install
+only what you use; the modules' code is not on your disk unless you
+install them:
+
+| Package                  | What it gives you                                      | Depends on                         |
+|--------------------------+--------------------------------------------------------+------------------------------------|
+| =gptel-permit=           | The rule engine: rules, scopes, validation, hard blocks | =gptel=                            |
+| =gptel-permit-sandbox=   | The =sandbox= rule action, =C-c C-s=, bwrap/srt backends | =gptel-permit=, =gptel=            |
+| =gptel-permit-judge=     | The ~gptel-permit-judge-safe-p~ condition and =judge= action | =gptel-permit=, =gptel=       |
+| =gptel-permit-analytics= | Local JSONL decision log, audit sampling, reports       | =gptel-permit=, =gptel=            |
+
+The modules register through documented extension points at load; a
+=use-package= declaration with =:after gptel-permit= in their =:config=
+(or just their own =use-package= blocks below) is the enablement. The core
+never names them: with only the core installed, a =sandbox= or =judge=
+rule simply fails closed to manual confirmation.
+
+The core:
+
 #+begin_src elisp
 (use-package gptel-permit
   :ensure t
@@ -42,7 +61,10 @@ Another day you bring in a tool which, for example, greps git logs in a folder. 
   (gptel-confirm-tool-calls 'auto))
 #+end_src
 
-(Note: =gptel-permit= requires =gptel= (v0.9.9+) and Emacs 29.1+.)
+(Note: =gptel-permit= requires =gptel= (v0.9.9+) and Emacs 29.1+.  When
+loading straight from this repository instead of a package, point =vc=/
+at the files you need: the four packages share one tree, and loading
+=gptel-permit.el= alone is exactly the core package.)
 
 * How It Works
 
@@ -453,16 +475,24 @@ bwrap --die-with-parent --new-session --clearenv --setenv V v ...
 
 ** Setup
 
+The sandbox is its own package (=gptel-permit-sandbox=, including the
+bwrap and srt backends). Install it beside the core and load it —
+installation alone does nothing, because registration of the ~sandbox~
+action happens at load:
+
 #+begin_src elisp
 (use-package gptel-permit
   :vc (:url "https://github.com/krvkir/gptel-permit" :rev :newest)
   :config
   (gptel-permit-mode 1))
+
+(use-package gptel-permit-sandbox
+  :after gptel-permit)
 #+end_src
 
-=gptel-permit-sandbox.el= is part of the package and is loaded on demand;
-you do not need to require it explicitly (the =sandbox= action fails closed
-if it is missing). Enablement is opt-in via a rule:
+You do not need to require the backend files individually (the =sandbox=
+action fails closed if the sandbox package is missing entirely). Enablement
+is opt-in via a rule:
 
 #+begin_src elisp
 ;; Auto-run anything inside the sandbox:
@@ -628,7 +658,10 @@ srt backend ships documented-but-untested.
 
 * LLM Judge (opt-in)
 
-=gptel-permit-judge.el= adds an LLM-as-a-judge rule condition: a small
+The LLM judge is its own package (=gptel-permit-judge=). Install it beside
+the core and load it — its condition and action register at load:
+
+=gptel-permit-judge= adds an LLM-as-a-judge rule condition: a small
 model classifies a grey-zone tool call (typically a =Bash= command) as
 obviously safe or not. The judge is /deny-only/: a =SAFE= verdict makes
 the enclosing rule match, everything else (including a failed or
@@ -840,8 +873,12 @@ the condition form).
 
 * Local Analytics (opt-in)
 
+Analytics is its own package (=gptel-permit-analytics=) — install only the
+core and skip it entirely if you do not want its code on disk, and audit
+the code if in doubt: the data never leaves the machine regardless.
+
 To know whether the permission layer is actually reducing prompt fatigue
-without sacrificing safety, =gptel-permit-analytics.el= records the full
+without sacrificing safety, it records the full
 decision chain of tool calls in an append-only JSONL log. The data stays
 on your machine and never leaves Emacs — hence "analytics", not telemetry.
 The module is /inert/ until you explicitly register it; nothing is written,
@@ -886,11 +923,9 @@ still fold into the statistics:
 ** Enabling
 
 #+begin_src elisp
-(use-package gptel-permit
-  :after gptel
+(use-package gptel-permit-analytics
+  :after gptel-permit
   :config
-  (gptel-permit-mode 1)
-  (require 'gptel-permit-analytics)
   (gptel-permit-register-analytics-hooks))
 #+end_src
 

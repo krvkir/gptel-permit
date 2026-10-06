@@ -3,8 +3,8 @@
 ;; Copyright (C) 2026 krvkir
 
 ;; Author: krvkir <krvkir@gmail.com>
-;; Version: 0.0.1
-;; Package-Requires: ((emacs "29.1") (gptel "0.9.9") (gptel-permit "0.0.1"))
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "29.1") (gptel "0.9.9") (gptel-permit "0.1.0"))
 ;; Keywords: convenience, tools, agents, security
 ;; URL: https://github.com/krvkir/gptel-permit
 
@@ -36,7 +36,8 @@
 (defgroup gptel-permit-analytics nil
   "Local decision analytics for gptel-permit."
   :group 'gptel-permit
-  :prefix "gptel-permit-analytics-")
+  :prefix "gptel-permit-analytics-"
+  :package-version '("gptel-permit-analytics" . "0.1.0"))
 
 (defcustom gptel-permit-analytics-enabled nil
   "When non-nil, gptel-permit analytics event capture is active.
@@ -74,6 +75,10 @@ never sampled.  Only active while analytics is registered and enabled."
 ;; The sandbox's sandboxed-acceptance binding (alist of rewritten args
 ;; → original args), defined in `gptel-permit-sandbox' and read on the
 ;; accept-time pop path above.  Declaration only, for the compiler.
+;; ABI declare: in an analytics-without-sandbox install the variable
+;; exists with value nil — the symbol is part of the cross-module
+;; dynamic-scope contract, this `defvar' merely documents it, and nil
+;; reads as "no rewrite happened".
 (defvar gptel-permit-sandbox--rewritten-args)
 
 (defconst gptel-permit-analytics--pending-limit 64
@@ -135,7 +140,7 @@ Any element is nil when the tool call carries no such information."
   "Return the ARGS plist as an association list of truncated strings."
   (cl-loop for (k v) on args by #'cddr
            collect (cons (substring (symbol-name k) 1)
-                         (gptel-permit--truncate-arg v))))
+                         (gptel-permit-truncate-arg v))))
 
 (defun gptel-permit-analytics--action-string (action)
   "Return the rule ACTION as a string, or \"none\" when nil.
@@ -341,7 +346,7 @@ judged argument string) and :latency-ms."
             `((judge-verdict . ,(symbol-name (plist-get payload :verdict)))))
         (judge-rationale . ,(or (plist-get payload :rationale) ""))
         ,@(when (plist-get payload :arg)
-            `((judge-arg . ,(gptel-permit--truncate-arg
+            `((judge-arg . ,(gptel-permit-truncate-arg
                              (plist-get payload :arg)))))
         ,@(when (plist-get payload :latency-ms)
             `((judge-latency-ms . ,(plist-get payload :latency-ms)))))))))
@@ -367,7 +372,7 @@ per function — belt and braces)."
           (:confirm    (gptel-permit-analytics--emit-confirm tool-call id))
           (:judge-verdict (gptel-permit-analytics--emit-judge-verdict
                            tool-call id payload)))
-      (error (gptel-permit--log "Analytics: %s event failed: %S" type err)))))
+      (error (gptel-permit-log "Analytics: %s event failed: %S" type err)))))
 
 (defun gptel-permit-analytics--automation-allow-p (verdict)
   "Return non-nil if VERDICT is an automation-allow.
@@ -423,7 +428,7 @@ programmatic resolver records its own decision events)."
           ;; resolution cannot be correlated; record it id-less.
           (gptel-permit-analytics--emit-decision nil nil nil choice)))
       (error
-       (gptel-permit--log "Analytics: decision capture failed: %S" err)))))
+       (gptel-permit-log "Analytics: decision capture failed: %S" err)))))
 
 (defun gptel-permit-analytics--advice-accept (tool-calls &optional ov &rest _)
   "Decision-capture advice for `gptel--accept-tool-calls'."

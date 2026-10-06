@@ -86,8 +86,8 @@ The built-in predicates SHALL include:
 - `:path-traversal` — true if the path contains `..` or is absolute.
 
 Protected-dir entries beginning with `./` SHALL be resolved relative to the
-project root (`gptel-permit--project-root`, falling back to
-`default-directory`) via `gptel-permit--expand-protected-dir`; all other
+project root (`gptel-permit-project-root`, falling back to
+`default-directory`) via `gptel-permit-expand-protected-dir`; all other
 entries SHALL be resolved with `expand-file-name`. The same resolution
 SHALL be used by the sandbox's protected-path binding, so a single
 `gptel-permit-protected-dirs` entry governs both rule matching and

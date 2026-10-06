@@ -1,0 +1,4 @@
+(gptel-permit
+ :fetcher github
+ :repo "krvkir/gptel-permit"
+ :files ("gptel-permit.el"))

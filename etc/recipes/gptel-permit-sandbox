@@ -1,0 +1,6 @@
+(gptel-permit-sandbox
+ :fetcher github
+ :repo "krvkir/gptel-permit"
+ :files ("gptel-permit-sandbox.el"
+         "gptel-permit-sandbox-bwrap.el"
+         "gptel-permit-sandbox-srt.el"))

@@ -73,7 +73,7 @@ When DRAWER-FIRST is non-nil the drawer precedes any keyword line."
   "Run BODY in a temp buffer inside the project ROOT.
 ROOT is an expression evaluating to the project's root directory.
 `project-current' is stubbed to a transient project rooted there, so
-`gptel-permit--project-root' resolves to ROOT; the parse cache starts
+`gptel-permit-project-root' resolves to ROOT; the parse cache starts
 empty."
   (declare (indent 1))
   (let ((r (make-symbol "proj-root")))
@@ -107,8 +107,9 @@ a reader and a writer."
   (should (gptel-permit--valid-persisted-rule-p
            '(:conditions ((path . :inside-project)) :action ask)))
   (should (gptel-permit--valid-persisted-rule-p
-           '(:tool "Bash" :conditions ((:command . gptel-permit-judge-safe-p))
-                  :action ask)))
+           '(:tool "Bash"
+                   :conditions ((:command . ert-deftest))
+                   :action ask)))
   (should (gptel-permit--valid-persisted-rule-p '(:tool-group search :action allow)))
   (should-not (gptel-permit--valid-persisted-rule-p
                '(:tool "Bash"

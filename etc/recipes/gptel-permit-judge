@@ -1,0 +1,4 @@
+(gptel-permit-judge
+ :fetcher github
+ :repo "krvkir/gptel-permit"
+ :files ("gptel-permit-judge.el"))

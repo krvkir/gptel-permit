@@ -1,0 +1,4 @@
+(gptel-permit-analytics
+ :fetcher github
+ :repo "krvkir/gptel-permit"
+ :files ("gptel-permit-analytics.el"))
