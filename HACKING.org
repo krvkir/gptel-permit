@@ -1,0 +1,67 @@
+The core module is complete on its own: rules, validation,
+path-traversal checks, logging and fail-closed error handling need no
+optional module.  Add-ons (sandbox, LLM judge, analytics) integrate
+through documented extension points. You may extend =gptel-permit=
+with your own tools likewise.
+
+** Action registry
+Rules' =:action= values dispatch through =gptel-permit-action-handlers=, a
+public alist mapping action symbols to handler functions. A handler is
+called as ~(ID TOOL-CALL)~ — the tool-call id and the enriched
+tool call — and returns a verdict plist (~(:confirm nil)~, ~(:confirm t)~,
+~(:block "reason")~, ~(:confirm nil :args NEW-ARGS)~) or nil (defer). The
+built-in ~allow~/~deny~/~ask~ entries are registered like any other; the
+sandbox module registers ~sandbox~ at load.
+
+Registering a custom action:
+
+#+begin_src elisp
+(setf (alist-get 'my-action gptel-permit-action-handlers)
+      (lambda (_id tool-call)
+        (if (string-match-p "^my-tools" (plist-get tool-call :name))
+            (list :confirm nil)               ; auto-approve
+          (list :confirm t))))               ; otherwise ask
+;; then: (:tool "Bash" :action my-action)
+#+end_src
+
+A matched action with /no/ registered handler fails closed (~(:confirm t)~),
+so a missing module can never silently auto-run a tool.
+
+** Engine hooks
+Three abnormal hooks observe and shape each decision; every engine
+callback receives the same leading arguments ~(ID TOOL-CALL)~:
+
+- =gptel-permit-before-rule-match-functions= — run once per tool call
+  after the =:tool-call= event and before rule matching. Modules use it
+  for per-call state lifecycle (the judge clears its verdict state
+  here). Errors propagate and fail the call closed.
+- =gptel-permit-events-functions= — an observer tap for the engine's
+  events: ~(ID TOOL-CALL TYPE PAYLOAD)~ with TYPE = =:tool-call=,
+  =:rule-match=, =:verdict= or =:confirm=. The event type set is open:
+  future engine versions may emit more types through the same hook.
+  Observers run isolated; an erroring observer is logged and can never
+  alter a verdict.
+- =gptel-permit-veto-functions= — run after the verdict is computed,
+  only when a rule matched, via =run-hook-with-args-until-success= as
+  ~(ID TOOL-CALL VERDICT)~. A non-nil return makes the *engine* upgrade
+  the verdict to ~(:confirm t)~, preserving any =:args= rewrite; veto
+  functions can only tighten, never loosen. Errors fail the call closed.
+  (Analytics audit sampling rides this hook.)
+
+** Tool-call ids
+Each processed tool call gets one tool-call id from
+=gptel-permit--mint-tool-call-id=, a
+string of the form =TIMESTAMP.PID.SERIAL= with millisecond precision
+(e.g. =20261005T143022.123.4242.42=) — unique across sessions, across
+concurrent Emacs processes, and across calls within a session, with no
+coordination. All events of one call share the id. Logs written by older
+versions carry integer ids; the statistics fold both.
+
+** Rule conditions
+A condition is just a cons cell with a tool-call property and a checker function. You can provide your own function: when it returns =t=, the condition is considered matched.
+
+There are special cases for checkers: a string is treated as a regexp, and four predicates are kept for backwards compatibility:
+- ~:inside-project~: True if the path is within the current project or default directory.
+- ~:outside-project~: True if the path is outside the current project.
+- ~:inside-protected-dirs~: True if the path is within any directory listed in =gptel-permit-protected-dirs=.
+- ~:path-traversal~: True if the unexpanded argument contains ~..~ or starts with ~/~ (absolute path).
